@@ -84,6 +84,7 @@ class MightyBridge(Node):
         self._last_traj_time = 0.0   # wall time of last MIGHTY trajectory
         self._task_active = False
         self._cancel_requested = False
+        self._route_active = False   # a NavigateTask or follower route is executing
         # follower state
         self._z0 = None
         self._settled_since = None
@@ -188,8 +189,23 @@ class MightyBridge(Node):
         n = len(msg.goals)
         if n == 0:
             return
+        now = time.monotonic()
         with self._lock:
-            self._last_traj_time = time.monotonic()
+            gap = now - self._last_traj_time if self._last_traj_time else 0.0
+            self._last_traj_time = now
+            route_active = self._route_active
+        # MIGHTY resuming after an idle (GOAL_REACHED at an intermediate
+        # goal): the controller has meanwhile idled at its trajectory end
+        # with virtual_time still advancing, so the resumed trajectory would
+        # splice at a past time and merge() would silently reject it (the
+        # hover-deadlock failure mode). Reset the timeline before forwarding.
+        if route_active and gap > 2.0:
+            self.get_logger().info(
+                f'planner resumed after {gap:.1f}s idle — resetting controller timeline')
+            self._set_mode(TrajectoryMode.Request.TRACK)
+            time.sleep(0.25)
+            self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
+            time.sleep(0.1)
 
         out = TrajectoryXYZVYaw()
         out.header.stamp = msg.header.stamp
@@ -322,6 +338,8 @@ class MightyBridge(Node):
                                f'{self.follow_lookahead} m)')
         # One-time controller timeline reset (duplicates — and therefore
         # does not require — the reference mission glue's mode switch).
+        with self._lock:
+            self._route_active = True
         self._set_mode(TrajectoryMode.Request.TRACK)
         time.sleep(0.2)
         self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
@@ -331,10 +349,14 @@ class MightyBridge(Node):
         while rclpy.ok():
             if self._task_active:
                 self.get_logger().info('follower: yielding to NavigateTask')
+                with self._lock:
+                    self._route_active = False
                 return
             with self._lock:
                 plan = self._follow_plan
             if plan is None:
+                with self._lock:
+                    self._route_active = False
                 return
             final = plan[-1].pose.position
             d_final = self._distance_to(final)
@@ -345,6 +367,7 @@ class MightyBridge(Node):
                 with self._lock:
                     self._follow_done_plan = (final.x, final.y, final.z)
                     self._follow_plan = None
+                    self._route_active = False
                 return
             carrot = self._carrot(plan)
             if carrot is not None:
@@ -410,6 +433,8 @@ class MightyBridge(Node):
         self.term_goal_pub.publish(msg)
 
     def _finish(self, goal_handle, success, message):
+        with self._lock:
+            self._route_active = False
         self._set_mode(TrajectoryMode.Request.TRACK)
         result = NavigateTask.Result()
         result.success = success
@@ -433,6 +458,8 @@ class MightyBridge(Node):
         self.get_logger().info(
             f'NavigateTask: {len(poses)} waypoints, goal tolerance {goal_tol:.2f} m')
 
+        with self._lock:
+            self._route_active = True
         self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
 
         idx = 0
