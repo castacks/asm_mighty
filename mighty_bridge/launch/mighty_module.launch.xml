@@ -32,6 +32,9 @@
   <arg name="mighty_odometry_topic"
        default="/$(env ROBOT_NAME)/odometry_conversion/odometry"
        description="Input odometry (nav_msgs/Odometry, map frame, body-frame twist)" />
+  <arg name="mighty_global_plan_topic"
+       default="/$(env ROBOT_NAME)/global_plan"
+       description="Input global route (nav_msgs/Path) the follower executes once airborne" />
   <arg name="mighty_set_trajectory_mode_service"
        default="/$(env ROBOT_NAME)/trajectory_controller/set_trajectory_mode"
        description="Trajectory-controller mode service (airstack_msgs/srv/TrajectoryMode)" />
@@ -65,6 +68,7 @@
     <!-- Bridge: NavigateTask action, odometry->State, Trajectory->segments -->
     <node pkg="mighty_bridge" exec="mighty_bridge_node" name="mighty_bridge" output="screen">
       <remap from="odometry" to="$(var mighty_odometry_topic)" />
+      <remap from="global_plan" to="$(var mighty_global_plan_topic)" />
       <remap from="mighty_trajectory" to="trajectory" />
       <remap from="trajectory_segment_to_add" to="$(var mighty_trajectory_segment_topic)" />
       <remap from="set_trajectory_mode" to="$(var mighty_set_trajectory_mode_service)" />
