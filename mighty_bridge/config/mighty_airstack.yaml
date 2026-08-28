@@ -3,7 +3,7 @@
 # mighty/config/mighty.yaml; changed values are listed here:
 #   use_hardware=true (independent map subs), share_traj=false, num_agents=1,
 #   drone_bbox=0.6^3, z-band 0.5..8.0, force_goal_z=false, inflation_hgp=0.6,
-#   planner_Co=0.8 (static clearance margin for a 1.0 m clearance requirement),
+#   planner_Co=0.9 (static clearance margin for a 1.0 m clearance requirement),
 #   initial/min_wdz=4.0, use_benchmark=false, visual_level=1.
 # --------------------------------------------------------------------------
 # Copyright 2025, Kota Kondo, Aerospace Controls Laboratory
@@ -117,7 +117,7 @@
         dyn_constr_vel_weight: 1e+3                     # [-] Velocity constraint violation weight
         dyn_constr_acc_weight: 1e+3                     # [-] Acceleration constraint violation weight
         dyn_constr_jerk_weight: 1e+3                    # [-] Jerk constraint violation weight
-        planner_Co: 0.8  # [m] Collision clearance for static obstacles
+        planner_Co: 0.9  # [m] Collision clearance for static obstacles
         planner_Cw: 1.3                                 # [m] Collision clearance for dynamic obstacles
 
         # --- Safety Corridors ---

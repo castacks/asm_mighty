@@ -58,18 +58,35 @@ class MightyBridge(Node):
         self.declare_parameter('segment_stride', 10)
         self.declare_parameter('twist_in_body_frame', True)
         self.declare_parameter('world_frame', 'map')
+        # global_plan follower (study R5-R7 contract): the route planner
+        # publishes a nav_msgs/Path on global_plan; once the vehicle has
+        # climbed follow_min_climb_m and settled, the bridge walks that
+        # path's poses as term_goal checkpoints exactly like a NavigateTask.
+        self.declare_parameter('follow_global_plan', True)
+        self.declare_parameter('follow_min_climb_m', 8.0)
+        self.declare_parameter('follow_settle_s', 3.0)
 
         self.waypoint_tolerance = float(self.get_parameter('waypoint_tolerance_m').value)
         self.republish_s = float(self.get_parameter('term_goal_republish_s').value)
         self.segment_stride = max(1, int(self.get_parameter('segment_stride').value))
         self.twist_in_body_frame = bool(self.get_parameter('twist_in_body_frame').value)
         self.world_frame = str(self.get_parameter('world_frame').value)
+        self.follow_enabled = bool(self.get_parameter('follow_global_plan').value)
+        self.follow_min_climb = float(self.get_parameter('follow_min_climb_m').value)
+        self.follow_settle_s = float(self.get_parameter('follow_settle_s').value)
 
         self._lock = threading.Lock()
         self._odom = None            # latest nav_msgs/Odometry
         self._last_traj_time = 0.0   # wall time of last MIGHTY trajectory
         self._task_active = False
         self._cancel_requested = False
+        # follower state
+        self._z0 = None
+        self._settled_since = None
+        self._airborne = False
+        self._follow_plan = None     # list of PoseStamped adopted from global_plan
+        self._follow_thread = None
+        self._follow_done_plan = None
 
         cb = ReentrantCallbackGroup()
 
@@ -111,9 +128,17 @@ class MightyBridge(Node):
             cancel_callback=self._handle_cancel,
             callback_group=cb)
 
+        # global_plan follower (see class docstring)
+        if self.follow_enabled:
+            from nav_msgs.msg import Path
+            self.create_subscription(Path, 'global_plan', self._global_plan_cb,
+                                     reliable_qos, callback_group=cb)
+            self.create_timer(1.0, self._follow_tick, callback_group=cb)
+
         self.get_logger().info(
             f'mighty_bridge up (waypoint_tolerance={self.waypoint_tolerance} m, '
-            f'stride={self.segment_stride}, world_frame={self.world_frame})')
+            f'stride={self.segment_stride}, world_frame={self.world_frame}, '
+            f'follow_global_plan={self.follow_enabled})')
 
     # ------------------------------------------------------------------
     # conversions
@@ -122,6 +147,23 @@ class MightyBridge(Node):
     def _odom_cb(self, msg: Odometry):
         with self._lock:
             self._odom = msg
+
+        # takeoff-settle detection for the follower (mirrors the mission-glue
+        # trigger: climbed follow_min_climb_m and vertical speed ~0 for
+        # follow_settle_s)
+        if self.follow_enabled and not self._airborne:
+            z = msg.pose.pose.position.z
+            vz = msg.twist.twist.linear.z
+            if self._z0 is None:
+                self._z0 = z
+            elif z - self._z0 > self.follow_min_climb and abs(vz) < 0.2:
+                if self._settled_since is None:
+                    self._settled_since = time.monotonic()
+                elif time.monotonic() - self._settled_since > self.follow_settle_s:
+                    self._airborne = True
+                    self.get_logger().info('follower: takeoff settled')
+            else:
+                self._settled_since = None
 
         s = State()
         s.header = msg.header
@@ -168,6 +210,92 @@ class MightyBridge(Node):
             wp.jerk.z = g.j.z
             out.waypoints.append(wp)
         self.segment_pub.publish(out)
+
+    # ------------------------------------------------------------------
+    # global_plan follower (study route contract: the route planner
+    # publishes the full route as a nav_msgs/Path on global_plan; the
+    # local layer executes it once airborne — same walk as NavigateTask)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _plans_equal(a, b, tol=0.5):
+        if a is None or b is None or len(a) != len(b):
+            return False
+        for pa, pb in zip(a, b):
+            qa, qb = pa.pose.position, pb.pose.position
+            if abs(qa.x - qb.x) + abs(qa.y - qb.y) + abs(qa.z - qb.z) > tol:
+                return False
+        return True
+
+    def _global_plan_cb(self, msg):
+        if not msg.poses:
+            return
+        poses = list(msg.poses)
+        with self._lock:
+            if self._plans_equal(poses, self._follow_plan) or \
+               self._plans_equal(poses, self._follow_done_plan):
+                return
+            self._follow_plan = poses
+        self.get_logger().info(
+            f'follower: adopted global_plan with {len(poses)} waypoints')
+
+    def _follow_tick(self):
+        if self._task_active or not self._airborne:
+            return
+        with self._lock:
+            plan = self._follow_plan
+        if plan is None:
+            return
+        if self._follow_thread is not None and self._follow_thread.is_alive():
+            return
+        self._follow_thread = threading.Thread(
+            target=self._follow_route, args=(plan,), daemon=True)
+        self._follow_thread.start()
+
+    def _follow_route(self, poses):
+        self.get_logger().info(f'follower: executing route ({len(poses)} waypoints)')
+        # Same timeline-reset rationale as the NavigateTask advance: make the
+        # controller merge cleanly from a cleared state. This duplicates (and
+        # therefore does not require) the reference mission glue.
+        self._set_mode(TrajectoryMode.Request.TRACK)
+        time.sleep(0.2)
+        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
+
+        idx = 0
+        last_pub = 0.0
+        final_pos = poses[-1].pose.position
+        while rclpy.ok():
+            with self._lock:
+                if not self._plans_equal(poses, self._follow_plan):
+                    self.get_logger().info('follower: plan changed, restarting walk')
+                    return
+            if self._task_active:
+                self.get_logger().info('follower: yielding to NavigateTask')
+                return
+            now = time.monotonic()
+            if now - last_pub > self.republish_s:
+                self._publish_term_goal(poses[idx])
+                last_pub = now
+            d_final = self._distance_to(final_pos)
+            if d_final is not None:
+                if idx == len(poses) - 1 and d_final < self.waypoint_tolerance:
+                    self.get_logger().info('follower: route complete')
+                    with self._lock:
+                        self._follow_done_plan = poses
+                        self._follow_plan = None
+                    return
+                if idx < len(poses) - 1:
+                    d = self._distance_to(poses[idx].pose.position)
+                    if d is not None and d < self.waypoint_tolerance:
+                        idx += 1
+                        self._set_mode(TrajectoryMode.Request.TRACK)
+                        time.sleep(0.2)
+                        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
+                        self._publish_term_goal(poses[idx])
+                        last_pub = now
+                        self.get_logger().info(
+                            f'follower: advancing to waypoint {idx + 1}/{len(poses)}')
+            time.sleep(0.2)
 
     # ------------------------------------------------------------------
     # NavigateTask
