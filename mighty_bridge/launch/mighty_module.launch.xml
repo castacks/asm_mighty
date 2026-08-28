@@ -38,9 +38,9 @@
   <arg name="mighty_set_trajectory_mode_service"
        default="/$(env ROBOT_NAME)/trajectory_controller/set_trajectory_mode"
        description="Trajectory-controller mode service (airstack_msgs/srv/TrajectoryMode)" />
-  <arg name="mighty_trajectory_segment_topic"
-       default="/$(env ROBOT_NAME)/trajectory_controller/trajectory_segment_to_add"
-       description="Output planned trajectory segment (airstack_msgs/TrajectoryXYZVYaw)" />
+  <arg name="mighty_trajectory_override_topic"
+       default="/$(env ROBOT_NAME)/trajectory_controller/trajectory_override"
+       description="Output trajectory replacement (airstack_msgs/TrajectoryXYZVYaw, receding-horizon override)" />
   <arg name="mighty_navigate_task_action"
        default="/$(env ROBOT_NAME)/tasks/navigate"
        description="Navigate task action server name (task_msgs/action/NavigateTask)" />
@@ -70,7 +70,7 @@
       <remap from="odometry" to="$(var mighty_odometry_topic)" />
       <remap from="global_plan" to="$(var mighty_global_plan_topic)" />
       <remap from="mighty_trajectory" to="trajectory" />
-      <remap from="trajectory_segment_to_add" to="$(var mighty_trajectory_segment_topic)" />
+      <remap from="trajectory_override" to="$(var mighty_trajectory_override_topic)" />
       <remap from="set_trajectory_mode" to="$(var mighty_set_trajectory_mode_service)" />
       <remap from="~/navigate_task" to="$(var mighty_navigate_task_action)" />
     </node>

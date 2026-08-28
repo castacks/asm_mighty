@@ -6,10 +6,11 @@ Responsibilities (one node so the module adds a single process):
   rotating the body-frame twist into the world frame (nav_msgs convention
   puts twist in the child frame; MIGHTY expects world-frame velocity).
 - MIGHTY's committed ``dynus_interfaces/Trajectory`` -> decimated
-  airstack_msgs/TrajectoryXYZVYaw on ``trajectory_segment_to_add``. The
-  trajectory controller's ADD_SEGMENT merge splices each new committed
-  trajectory at the closest future point, matching MIGHTY's
-  replan-from-committed-point behavior.
+  airstack_msgs/TrajectoryXYZVYaw on ``trajectory_override`` (throttled
+  receding-horizon replacement; with vehicle-synchronized plan consumption
+  every committed trajectory starts at the vehicle, so a clear-and-set
+  override avoids the ADD_SEGMENT merge/virtual_time bookkeeping whose
+  splice rejections produced silent hover deadlocks).
 - NavigateTask action server (``~/navigate_task``): walks the goal path's
   poses as successive ``term_goal`` checkpoints for MIGHTY, mirroring the
   droan_gl task contract (ADD_SEGMENT while navigating, TRACK on exit).
@@ -56,6 +57,7 @@ class MightyBridge(Node):
         self.declare_parameter('waypoint_tolerance_m', 2.0)
         self.declare_parameter('term_goal_republish_s', 5.0)
         self.declare_parameter('segment_stride', 5)  # 0.05 s spacing: denser segments track corners tighter
+        self.declare_parameter('override_period_s', 1.0)  # receding-horizon trajectory replacement rate
         self.declare_parameter('twist_in_body_frame', True)
         self.declare_parameter('world_frame', 'map')
         # global_plan follower (study R5-R7 contract): the route planner
@@ -72,6 +74,7 @@ class MightyBridge(Node):
         self.waypoint_tolerance = float(self.get_parameter('waypoint_tolerance_m').value)
         self.republish_s = float(self.get_parameter('term_goal_republish_s').value)
         self.segment_stride = max(1, int(self.get_parameter('segment_stride').value))
+        self.override_period = float(self.get_parameter('override_period_s').value)
         self.twist_in_body_frame = bool(self.get_parameter('twist_in_body_frame').value)
         self.world_frame = str(self.get_parameter('world_frame').value)
         self.follow_enabled = bool(self.get_parameter('follow_global_plan').value)
@@ -114,9 +117,14 @@ class MightyBridge(Node):
         self.create_subscription(Odometry, 'odometry', self._odom_cb, latest_qos,
                                  callback_group=cb)
 
-        # MIGHTY committed trajectory in -> controller segment out
+        # MIGHTY committed trajectory in -> controller trajectory replacement.
+        # With vehicle-synchronized plan consumption every committed trajectory
+        # STARTS at the vehicle, so a throttled trajectory_override (clear +
+        # set, virtual_time := 0) is a clean receding-horizon handoff — no
+        # ADD_SEGMENT merge bookkeeping (whose virtual_time splice-rejection
+        # produced silent hover deadlocks in three distinct variants).
         self.segment_pub = self.create_publisher(
-            TrajectoryXYZVYaw, 'trajectory_segment_to_add', 1)
+            TrajectoryXYZVYaw, 'trajectory_override', 1)
         self.create_subscription(Trajectory, 'mighty_trajectory', self._traj_cb,
                                  reliable_qos, callback_group=cb)
 
@@ -193,37 +201,31 @@ class MightyBridge(Node):
         now = time.monotonic()
         g_end = msg.goals[-1]
         with self._lock:
-            gap = now - self._last_traj_time if self._last_traj_time else 0.0
+            last_fwd = getattr(self, '_last_forward_time', 0.0)
             self._last_traj_time = now
             route_active = self._route_active
-            # committed-trajectory end: where MIGHTY believes the vehicle ends
-            # up (the follower's catch-up gate compares the vehicle to this)
+            # committed-trajectory end (the follower's catch-up gate compares
+            # the vehicle to this)
             self._traj_end = (g_end.p.x, g_end.p.y, g_end.p.z)
-        # Never forward a segment whose START is far from the vehicle: after a
-        # timeline reset the controller's tracking point jumps to the segment
-        # start and the PID flies an uncommanded straight line through
-        # unswept space (observed: pillar penetration). The follower's
-        # catch-up gate keeps MIGHTY idle until the vehicle is close, so a
-        # far-start segment here is always transient — drop it.
+        # Receding-horizon throttle: replacing the controller trajectory at
+        # every replan (30-50 Hz) would keep re-anchoring the tracking point;
+        # once per override_period_s gives the controller a full window to
+        # track before the next replacement (whose start is at the vehicle).
+        if now - last_fwd < self.override_period:
+            return
+        # Never forward a trajectory whose START is far from the vehicle: the
+        # override re-anchors the tracking point there and the PID would fly
+        # an uncommanded straight line through unswept space (observed:
+        # pillar penetration). With vehicle-synchronized consumption this is
+        # always transient — drop and wait.
         s0 = msg.goals[0]
         d_start = self._distance_to_xyz(s0.p.x, s0.p.y, s0.p.z)
         if route_active and d_start is not None and d_start > 4.0:
             self.get_logger().warn(
-                f'dropping segment starting {d_start:.1f} m from the vehicle '
-                f'(catch-up in progress)')
+                f'dropping trajectory starting {d_start:.1f} m from the vehicle')
             return
-        # MIGHTY resuming after an idle (GOAL_REACHED at an intermediate
-        # goal): the controller has meanwhile idled at its trajectory end
-        # with virtual_time still advancing, so the resumed trajectory would
-        # splice at a past time and merge() would silently reject it (the
-        # hover-deadlock failure mode). Reset the timeline before forwarding.
-        if route_active and gap > 2.0:
-            self.get_logger().info(
-                f'planner resumed after {gap:.1f}s idle — resetting controller timeline')
-            self._set_mode(TrajectoryMode.Request.TRACK)
-            time.sleep(0.25)
-            self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
-            time.sleep(0.1)
+        with self._lock:
+            self._last_forward_time = now
 
         out = TrajectoryXYZVYaw()
         out.header.stamp = msg.header.stamp
@@ -358,9 +360,7 @@ class MightyBridge(Node):
         # does not require — the reference mission glue's mode switch).
         with self._lock:
             self._route_active = True
-        self._set_mode(TrajectoryMode.Request.TRACK)
-        time.sleep(0.2)
-        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
+        # trajectory_override needs no controller mode management
 
         last_goal = None
         last_pub = 0.0
@@ -501,7 +501,7 @@ class MightyBridge(Node):
 
         with self._lock:
             self._route_active = True
-        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
+        # trajectory_override needs no controller mode management
 
         idx = 0
         last_pub = 0.0
@@ -538,16 +538,6 @@ class MightyBridge(Node):
                     d = self._distance_to(poses[idx].pose.position)
                     if d is not None and d < self.waypoint_tolerance:
                         idx += 1
-                        # Reset the controller timeline before the new leg:
-                        # after a leg completes the controller idles at the
-                        # trajectory end while virtual_time keeps advancing,
-                        # so the next leg's segment would splice at a past
-                        # time and merge() would reject it forever. TRACK
-                        # clears the trajectory; ADD_SEGMENT (from TRACK)
-                        # zeroes virtual_time so the new leg merges cleanly.
-                        self._set_mode(TrajectoryMode.Request.TRACK)
-                        time.sleep(0.2)
-                        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
                         self._publish_term_goal(poses[idx])
                         last_pub = now
                         self.get_logger().info(
