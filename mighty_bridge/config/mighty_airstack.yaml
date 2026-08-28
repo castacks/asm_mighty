@@ -3,7 +3,7 @@
 # mighty/config/mighty.yaml; changed values are listed here:
 #   use_hardware=true (independent map subs), share_traj=false, num_agents=1,
 #   drone_bbox=0.6^3, z-band 0.5..8.0, force_goal_z=false, inflation_hgp=0.6,
-#   planner_Co=0.9 (static clearance margin for a 1.0 m clearance requirement),
+#   planner_Co=1.2 + inflation_hgp=0.8 + v_max=1.5 (1.0 m clearance gate + ~0.5 m observed double-tracking error -> plan-margin 1.5 m nominal),
 #   initial/min_wdz=4.0, use_benchmark=false, visual_level=1.
 # --------------------------------------------------------------------------
 # Copyright 2025, Kota Kondo, Aerospace Controls Laboratory
@@ -61,7 +61,7 @@
         # formation_neighbor_offsets: []                  # [m] flat 3*N: δ_ij for each neighbor in same order as ids
 
         # --- Vehicle Dynamic Limits ---
-        v_max: 2.0                                      # [m/s]   Max velocity
+        v_max: 1.5                                      # [m/s]   Max velocity
         a_max: 5.0                                      # [m/s^2] Max acceleration
         j_max: 10.0                                     # [m/s^3] Max jerk
         w_max: 1.0                                      # [rad/s] Max yaw rate (~4.0 for hardware)
@@ -100,7 +100,7 @@
 
         # --- Global Planner ---
         global_planner: "astar_heat"                    # ["sjps", "astar_heat"]
-        inflation_hgp: 0.6  # [m] Static obstacle inflation for global A* planning
+        inflation_hgp: 0.8  # [m] Static obstacle inflation for global A* planning
         hgp_timeout_duration_ms: 10000                  # [ms] Global planner timeout
         max_expand: 1000000                             # [-] Max A* node expansions
 
@@ -117,7 +117,7 @@
         dyn_constr_vel_weight: 1e+3                     # [-] Velocity constraint violation weight
         dyn_constr_acc_weight: 1e+3                     # [-] Acceleration constraint violation weight
         dyn_constr_jerk_weight: 1e+3                    # [-] Jerk constraint violation weight
-        planner_Co: 0.9  # [m] Collision clearance for static obstacles
+        planner_Co: 1.2  # [m] Collision clearance for static obstacles
         planner_Cw: 1.3                                 # [m] Collision clearance for dynamic obstacles
 
         # --- Safety Corridors ---

@@ -55,7 +55,7 @@ class MightyBridge(Node):
 
         self.declare_parameter('waypoint_tolerance_m', 2.0)
         self.declare_parameter('term_goal_republish_s', 5.0)
-        self.declare_parameter('segment_stride', 10)
+        self.declare_parameter('segment_stride', 5)  # 0.05 s spacing: denser segments track corners tighter
         self.declare_parameter('twist_in_body_frame', True)
         self.declare_parameter('world_frame', 'map')
         # global_plan follower (study R5-R7 contract): the route planner
