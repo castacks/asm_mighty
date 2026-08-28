@@ -1686,8 +1686,22 @@ bool MIGHTY::getNextGoal(state& next_goal) {
     std::lock_guard<std::mutex> lock(mtx_plan_);
     local_plan = plan_;
 
-    // If there's more than one goal setpoint, pop the front
-    if (plan_.size() > 1) {
+    // If there's more than one goal setpoint, pop the front.
+    // asm_mighty: vehicle-synchronized consumption. Upstream pops at wall-
+    // clock rate (dc), assuming the vehicle executes the 100 Hz goals in
+    // real time. Behind a tracking controller the vehicle follows the PATH
+    // but not the TIMELINE, so the plan front (= the replanning anchor A)
+    // races ahead at corners (observed 8.7 m -> anchor gap deadlocks and,
+    // pre-guard, an uncommanded straight-line pillar penetration). Pause
+    // consumption whenever the plan front is farther than 3 m from the
+    // measured state; replans then always start near the vehicle.
+    bool may_pop = plan_.size() > 1;
+    if (may_pop) {
+      state cur;
+      getState(cur);
+      if ((plan_.front().pos - cur.pos).norm() > 3.0) may_pop = false;
+    }
+    if (may_pop) {
       plan_.pop_front();
     }
   }

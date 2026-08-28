@@ -207,7 +207,7 @@ class MightyBridge(Node):
         # far-start segment here is always transient — drop it.
         s0 = msg.goals[0]
         d_start = self._distance_to_xyz(s0.p.x, s0.p.y, s0.p.z)
-        if route_active and d_start is not None and d_start > 2.5:
+        if route_active and d_start is not None and d_start > 4.0:
             self.get_logger().warn(
                 f'dropping segment starting {d_start:.1f} m from the vehicle '
                 f'(catch-up in progress)')
