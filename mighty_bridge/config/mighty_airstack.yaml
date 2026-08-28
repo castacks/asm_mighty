@@ -305,7 +305,14 @@
         debug_log_file: ""  # [path] dump every published goal & received term_goal here ("" disables)
 
         # --- Paper Visualization (development only) ---
-        use_state_update: true                          # [-] Use state update (false = freeze agent for viz)
+        use_state_update: false                 # asm_mighty: anchor every replan to the MEASURED state.
+        # Upstream true = plan from the committed-trajectory timeline (assumes the
+        # vehicle tracks MIGHTY's own 100 Hz goals in real time). Behind AirStack's
+        # trajectory_controller the vehicle follows the PATH but not the TIMELINE,
+        # so after any planner idle the committed anchor sits ahead of the vehicle
+        # and the post-reset tracking point jump commands an uncommanded straight
+        # line (observed: pillar penetration -0.711 m). State-anchored replans keep
+        # every segment starting at the vehicle.
         use_random_color_for_global_path: false         # [-] Random color for global path
         use_path_push_for_visualization: false          # [-] Only do global planning (paper viz mode)
 
