@@ -273,6 +273,16 @@ class MightyBridge(Node):
                     d = self._distance_to(poses[idx].pose.position)
                     if d is not None and d < self.waypoint_tolerance:
                         idx += 1
+                        # Reset the controller timeline before the new leg:
+                        # after a leg completes the controller idles at the
+                        # trajectory end while virtual_time keeps advancing,
+                        # so the next leg's segment would splice at a past
+                        # time and merge() would reject it forever. TRACK
+                        # clears the trajectory; ADD_SEGMENT (from TRACK)
+                        # zeroes virtual_time so the new leg merges cleanly.
+                        self._set_mode(TrajectoryMode.Request.TRACK)
+                        time.sleep(0.2)
+                        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
                         self._publish_term_goal(poses[idx])
                         last_pub = now
                         self.get_logger().info(

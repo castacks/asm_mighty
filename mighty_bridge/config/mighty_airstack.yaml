@@ -84,7 +84,7 @@
         y_min: -1000.0                                  # [m] Map y lower bound
         y_max: 1000.0                                   # [m] Map y upper bound
         z_min: 0.5  # [m] Min altitude (points below are ground)
-        z_max: 8.0  # [m] Max altitude
+        z_max: 14.0  # [m] Max altitude
         mighty_map_res: 0.15                            # [m] Voxel map resolution
 
         # --- Goal ---
@@ -145,7 +145,7 @@
         # --- Map Window ---
         initial_wdx: 20.0                               # [m] Initial map window width
         initial_wdy: 20.0                               # [m] Initial map window depth
-        initial_wdz: 4.0  # [m] Initial map window height
+        initial_wdz: 6.0  # [m] Initial map window height
 
         # --- Sensor ---
         depth_camera_depth_max: 10.0                    # [m] Max depth camera range (d435 in simulation)
@@ -248,7 +248,7 @@
         center_shift_factor: 0.5                        # [-] Map center shift factor
         min_wdx: 15.0                                   # [m] Min map window width
         min_wdy: 15.0                                   # [m] Min map window depth
-        min_wdz: 4.0  # [m] Min map window height
+        min_wdz: 6.0  # [m] Min map window height
 
         # --- Communication Delay ---
         use_comm_delay_inflation: true                  # [-] Enable communication delay inflation

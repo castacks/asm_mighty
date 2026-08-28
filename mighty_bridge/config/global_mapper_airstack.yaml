@@ -10,9 +10,9 @@
         # drone_frame (the TF frame the input cloud is registered from) is set
         # from the launch file so the stack can rewire the sensor.
         lock_origin: false
-        origin: [0.0, 0.0, 3.0]            # window center z=3 -> covers z in [0, 6]
-        world_dimensions: [24.0, 24.0, 6.0]
-        resolution: 0.15
+        origin: [0.0, 0.0, 0.0]            # initial center; UpdateOrigin recenters on the drone
+        world_dimensions: [24.0, 24.0, 12.0]  # window follows drone in all axes; +/-6 m vertical
+        resolution: 0.2
         clear_unknown_radius: 0.8
         clear_unknown_height: 2.0
         clear_occupied_radius: 0.2
@@ -23,7 +23,7 @@
         r1: 0.8
         r2: 15.0                           # unknown-space sphere radius
         z_min_unknown: 0.1
-        z_max_unknown: 6.0
+        z_max_unknown: 16.0                # absolute filter; must cover flight altitude
 
         occupancy_grid:
           init_value: -1.0                 # start unknown
