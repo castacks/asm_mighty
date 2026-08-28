@@ -437,16 +437,35 @@ bool MIGHTY::findAandAtime(state& A, double& A_time, double current_time,
           plan_size - 1;  // If k_value_ is larger than the plan size, we set it to the last state
     }
 
-    // Get A
+    // asm_mighty: VEHICLE-ANCHORED replanning. Upstream anchors A a
+    // computation-time allowance from the plan TAIL, assuming the vehicle
+    // executes the plan timeline in real time. Behind a tracking controller
+    // the vehicle follows the path at its own pace, so the tail-relative
+    // anchor races ahead (observed: 8.7 m anchor gap; 1013 dropped
+    // trajectories in one flight after the consumption-pause patch, which
+    // bounded the FRONT but not the anchor). Anchor instead at the plan
+    // state nearest the MEASURED state plus a small lead.
     {
+      state cur;
+      getState(cur);
       std::lock_guard<std::mutex> lock(mtx_plan_);
-      A = plan_[plan_size - 1 - k_value_];
+      plan_size = (int)plan_.size();  // re-read under THIS lock
+      if (plan_size == 0) return false;
+      int nearest = 0;
+      double best = std::numeric_limits<double>::max();
+      for (int i = 0; i < plan_size; ++i) {
+        const double d = (plan_[i].pos - cur.pos).norm();
+        if (d < best) {
+          best = d;
+          nearest = i;
+        }
+      }
+      const int lead_steps = std::max(30, (int)(est_comp_time_ / par_.dc));  // >= 0.3 s
+      const int idx = std::min(nearest + lead_steps, plan_size - 1);
+      k_value_ = plan_size - 1 - idx;
+      A = plan_[idx];
+      A_time = current_time + (idx - nearest) * par_.dc;
     }
-
-    // Get A_time
-    A_time = current_time +
-             (plan_size - 1 - k_value_) *
-                 par_.dc;  // time to A from current_pos is (plan_size - 1 - k_value_) * par_.dc;
   } else  // If we don't update state - this is for global planner benchmarking purposes
   {
     // Get state
