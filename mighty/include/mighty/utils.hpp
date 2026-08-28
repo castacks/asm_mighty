@@ -24,7 +24,7 @@
 #include "dynus_interfaces/msg/dyn_traj.hpp"
 #include "dynus_interfaces/msg/pwp_traj.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace mighty_utils {
 

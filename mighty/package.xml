@@ -17,6 +17,7 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
   <depend>rclpy</depend>
   <depend>rclcpp_components</depend>
   <depend>example_interfaces</depend>

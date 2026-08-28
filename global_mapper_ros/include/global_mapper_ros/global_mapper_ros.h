@@ -41,7 +41,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 // ROS 2 utilities
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <image_transport/image_transport.hpp>
 #include <message_filters/subscriber.h>
 

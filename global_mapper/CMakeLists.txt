@@ -137,7 +137,9 @@ ament_export_libraries(occupancy_grid
                        distance_grid_2d
                        temporal_grid
                        global_mapper)
-ament_export_dependencies(PCL Eigen3)
+# asm_mighty: do not re-export unrestricted PCL (PCLConfig pulls VTK->MPI targets
+# absent in the robot image); downstream finds its own component-restricted PCL.
+ament_export_dependencies(Eigen3)
 ament_package()
 
 # NOTE: test/occupancy_grid_2d_tests.cc documents the expected tristate

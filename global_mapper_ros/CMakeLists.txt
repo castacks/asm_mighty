@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14.4)
-project(global_mapper_ros LANGUAGES CXX)
+project(global_mapper_ros LANGUAGES C CXX)  # asm_mighty: C enabled so MPI::MPI_C resolves for vtk-config
 
 # ————————————————————————————————————————————————————————
 # Use ccache if available
@@ -23,6 +23,7 @@ endif()
 # Find ROS2 / ament dependencies
 # ————————————————————————————————————————————————————————
 find_package(ament_cmake             REQUIRED)
+find_package(MPI COMPONENTS C QUIET)  # asm_mighty: define MPI::MPI_C before PCL pulls vtk-config (VTK::mpi links it)
 find_package(rclcpp                   REQUIRED)
 find_package(global_mapper            REQUIRED)
 find_package(fla_utils                REQUIRED)
