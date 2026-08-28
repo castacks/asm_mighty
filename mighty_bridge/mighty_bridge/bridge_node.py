@@ -65,6 +65,9 @@ class MightyBridge(Node):
         self.declare_parameter('follow_global_plan', True)
         self.declare_parameter('follow_min_climb_m', 8.0)
         self.declare_parameter('follow_settle_s', 3.0)
+        # > mighty's goal_seen_radius (5.0) so the moving carrot never puts
+        # the planner into GOAL_SEEN/GOAL_REACHED before the true route end
+        self.declare_parameter('follow_lookahead_m', 8.0)
 
         self.waypoint_tolerance = float(self.get_parameter('waypoint_tolerance_m').value)
         self.republish_s = float(self.get_parameter('term_goal_republish_s').value)
@@ -74,6 +77,7 @@ class MightyBridge(Node):
         self.follow_enabled = bool(self.get_parameter('follow_global_plan').value)
         self.follow_min_climb = float(self.get_parameter('follow_min_climb_m').value)
         self.follow_settle_s = float(self.get_parameter('follow_settle_s').value)
+        self.follow_lookahead = float(self.get_parameter('follow_lookahead_m').value)
 
         self._lock = threading.Lock()
         self._odom = None            # latest nav_msgs/Odometry
@@ -212,32 +216,26 @@ class MightyBridge(Node):
         self.segment_pub.publish(out)
 
     # ------------------------------------------------------------------
-    # global_plan follower (study route contract: the route planner
-    # publishes the full route as a nav_msgs/Path on global_plan; the
-    # local layer executes it once airborne — same walk as NavigateTask)
+    # global_plan follower (study route contract): the route planner
+    # publishes a DENSE nav_msgs/Path on global_plan, re-anchored at the
+    # vehicle and republished continuously. Once airborne, the bridge
+    # pure-pursuits it: term_goal = the path point a lookahead distance
+    # ahead of the vehicle's projection onto the path, sliding to the
+    # path end. The moving carrot keeps MIGHTY in TRAVELING (no
+    # GOAL_REACHED idles mid-route), so the controller timeline extends
+    # continuously and no per-leg mode resets are needed.
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _plans_equal(a, b, tol=0.5):
-        if a is None or b is None or len(a) != len(b):
-            return False
-        for pa, pb in zip(a, b):
-            qa, qb = pa.pose.position, pb.pose.position
-            if abs(qa.x - qb.x) + abs(qa.y - qb.y) + abs(qa.z - qb.z) > tol:
-                return False
-        return True
 
     def _global_plan_cb(self, msg):
         if not msg.poses:
             return
         poses = list(msg.poses)
         with self._lock:
-            if self._plans_equal(poses, self._follow_plan) or \
-               self._plans_equal(poses, self._follow_done_plan):
-                return
+            first = self._follow_plan is None
             self._follow_plan = poses
-        self.get_logger().info(
-            f'follower: adopted global_plan with {len(poses)} waypoints')
+        if first:
+            self.get_logger().info(
+                f'follower: adopted global_plan ({len(poses)} poses)')
 
     def _follow_tick(self):
         if self._task_active or not self._airborne:
@@ -246,56 +244,85 @@ class MightyBridge(Node):
             plan = self._follow_plan
         if plan is None:
             return
+        final = plan[-1].pose.position
+        done = self._follow_done_plan
+        if done is not None:
+            dx = final.x - done[0]
+            dy = final.y - done[1]
+            dz = final.z - done[2]
+            if (dx * dx + dy * dy + dz * dz) ** 0.5 < 2.0:
+                return  # this route was already completed
         if self._follow_thread is not None and self._follow_thread.is_alive():
             return
         self._follow_thread = threading.Thread(
-            target=self._follow_route, args=(plan,), daemon=True)
+            target=self._follow_route, daemon=True)
         self._follow_thread.start()
 
-    def _follow_route(self, poses):
-        self.get_logger().info(f'follower: executing route ({len(poses)} waypoints)')
-        # Same timeline-reset rationale as the NavigateTask advance: make the
-        # controller merge cleanly from a cleared state. This duplicates (and
-        # therefore does not require) the reference mission glue.
+    def _carrot(self, poses):
+        """Path point ~follow_lookahead_m beyond the vehicle's projection."""
+        with self._lock:
+            odom = self._odom
+        if odom is None:
+            return None
+        p = odom.pose.pose.position
+        # nearest pose index (paths from the study planner are anchored at
+        # the vehicle, so this is usually 0; static paths also work)
+        best_i, best_d = 0, float('inf')
+        for i, ps in enumerate(poses):
+            q = ps.pose.position
+            d = (q.x - p.x) ** 2 + (q.y - p.y) ** 2 + (q.z - p.z) ** 2
+            if d < best_d:
+                best_d, best_i = d, i
+        acc = 0.0
+        prev = poses[best_i].pose.position
+        for ps in poses[best_i + 1:]:
+            q = ps.pose.position
+            acc += math.dist((prev.x, prev.y, prev.z), (q.x, q.y, q.z))
+            prev = q
+            if acc >= self.follow_lookahead:
+                return ps
+        return poses[-1]
+
+    def _follow_route(self):
+        self.get_logger().info('follower: engaging (lookahead '
+                               f'{self.follow_lookahead} m)')
+        # One-time controller timeline reset (duplicates — and therefore
+        # does not require — the reference mission glue's mode switch).
         self._set_mode(TrajectoryMode.Request.TRACK)
         time.sleep(0.2)
         self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
 
-        idx = 0
+        last_goal = None
         last_pub = 0.0
-        final_pos = poses[-1].pose.position
         while rclpy.ok():
-            with self._lock:
-                if not self._plans_equal(poses, self._follow_plan):
-                    self.get_logger().info('follower: plan changed, restarting walk')
-                    return
             if self._task_active:
                 self.get_logger().info('follower: yielding to NavigateTask')
                 return
-            now = time.monotonic()
-            if now - last_pub > self.republish_s:
-                self._publish_term_goal(poses[idx])
-                last_pub = now
-            d_final = self._distance_to(final_pos)
-            if d_final is not None:
-                if idx == len(poses) - 1 and d_final < self.waypoint_tolerance:
-                    self.get_logger().info('follower: route complete')
-                    with self._lock:
-                        self._follow_done_plan = poses
-                        self._follow_plan = None
-                    return
-                if idx < len(poses) - 1:
-                    d = self._distance_to(poses[idx].pose.position)
-                    if d is not None and d < self.waypoint_tolerance:
-                        idx += 1
-                        self._set_mode(TrajectoryMode.Request.TRACK)
-                        time.sleep(0.2)
-                        self._set_mode(TrajectoryMode.Request.ADD_SEGMENT)
-                        self._publish_term_goal(poses[idx])
-                        last_pub = now
-                        self.get_logger().info(
-                            f'follower: advancing to waypoint {idx + 1}/{len(poses)}')
-            time.sleep(0.2)
+            with self._lock:
+                plan = self._follow_plan
+            if plan is None:
+                return
+            final = plan[-1].pose.position
+            d_final = self._distance_to(final)
+            if d_final is not None and d_final < self.waypoint_tolerance:
+                self._publish_term_goal(plan[-1])
+                self.get_logger().info(
+                    f'follower: route complete ({d_final:.2f} m from end)')
+                with self._lock:
+                    self._follow_done_plan = (final.x, final.y, final.z)
+                    self._follow_plan = None
+                return
+            carrot = self._carrot(plan)
+            if carrot is not None:
+                c = carrot.pose.position
+                now = time.monotonic()
+                moved = (last_goal is None or
+                         math.dist((c.x, c.y, c.z), last_goal) > 1.0)
+                if moved or now - last_pub > self.republish_s:
+                    self._publish_term_goal(carrot)
+                    last_goal = (c.x, c.y, c.z)
+                    last_pub = now
+            time.sleep(0.3)
 
     # ------------------------------------------------------------------
     # NavigateTask
