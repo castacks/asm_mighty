@@ -346,12 +346,13 @@ class MightyBridge(Node):
                     if dot < -0.17:  # direction reversed > ~100 deg
                         near = math.dist((p.x, p.y, p.z), (q.x, q.y, q.z))
                         if near > 1.5:
-                            return ps  # clamp at the corner until reached
+                            return ps, False  # clamp at the corner until reached
                         ref_dir = d    # corner reached: release, walk on
                         acc = 0.0
             if acc >= self.follow_lookahead:
-                return ps
-        return poses[-1]
+                return ps, False
+        # the walk exhausted the path: the carrot IS the route end
+        return poses[-1], True
 
     def _follow_route(self):
         self.get_logger().info('follower: engaging (lookahead '
@@ -378,7 +379,14 @@ class MightyBridge(Node):
                 return
             final = plan[-1].pose.position
             d_final = self._distance_to(final)
-            if d_final is not None and d_final < self.waypoint_tolerance:
+            carrot, at_end = self._carrot(plan) or (None, False)
+            # Completion requires the carrot walk to have REACHED the path
+            # end, not mere spatial proximity to plan[-1]: route legs can
+            # pass near the final checkpoint's location mid-route (observed:
+            # spurious completion 1.32 m from the final with two checkpoints
+            # still unvisited — vehicle parked mid-route).
+            if (at_end and d_final is not None
+                    and d_final < self.waypoint_tolerance):
                 self._publish_term_goal(plan[-1])
                 self.get_logger().info(
                     f'follower: route complete ({d_final:.2f} m from end)')
@@ -402,7 +410,6 @@ class MightyBridge(Node):
                 if d_end is not None and d_end > 2.5:
                     time.sleep(0.3)
                     continue
-            carrot = self._carrot(plan)
             if carrot is not None:
                 c = carrot.pose.position
                 # Defensive: never hand MIGHTY a goal at the vehicle's own
