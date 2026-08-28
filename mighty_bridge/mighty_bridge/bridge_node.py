@@ -92,6 +92,7 @@ class MightyBridge(Node):
         self._follow_plan = None     # list of PoseStamped adopted from global_plan
         self._follow_thread = None
         self._follow_done_plan = None
+        self._traj_end = None        # last committed MIGHTY trajectory endpoint
 
         cb = ReentrantCallbackGroup()
 
@@ -190,10 +191,27 @@ class MightyBridge(Node):
         if n == 0:
             return
         now = time.monotonic()
+        g_end = msg.goals[-1]
         with self._lock:
             gap = now - self._last_traj_time if self._last_traj_time else 0.0
             self._last_traj_time = now
             route_active = self._route_active
+            # committed-trajectory end: where MIGHTY believes the vehicle ends
+            # up (the follower's catch-up gate compares the vehicle to this)
+            self._traj_end = (g_end.p.x, g_end.p.y, g_end.p.z)
+        # Never forward a segment whose START is far from the vehicle: after a
+        # timeline reset the controller's tracking point jumps to the segment
+        # start and the PID flies an uncommanded straight line through
+        # unswept space (observed: pillar penetration). The follower's
+        # catch-up gate keeps MIGHTY idle until the vehicle is close, so a
+        # far-start segment here is always transient — drop it.
+        s0 = msg.goals[0]
+        d_start = self._distance_to_xyz(s0.p.x, s0.p.y, s0.p.z)
+        if route_active and d_start is not None and d_start > 2.5:
+            self.get_logger().warn(
+                f'dropping segment starting {d_start:.1f} m from the vehicle '
+                f'(catch-up in progress)')
+            return
         # MIGHTY resuming after an idle (GOAL_REACHED at an intermediate
         # goal): the controller has meanwhile idled at its trajectory end
         # with virtual_time still advancing, so the resumed trajectory would
@@ -369,6 +387,21 @@ class MightyBridge(Node):
                     self._follow_plan = None
                     self._route_active = False
                 return
+            # Catch-up gate: if MIGHTY has gone idle (no trajectories) with
+            # its committed end still far from the vehicle, withhold new
+            # carrots — the controller is still flying the remaining path to
+            # that end. Publishing a goal now would make MIGHTY replan from
+            # the far end (spatial gap -> uncommanded straight line after the
+            # timeline reset). Resume once the vehicle has caught up.
+            with self._lock:
+                idle = (self._last_traj_time > 0 and
+                        time.monotonic() - self._last_traj_time > 2.0)
+                traj_end = self._traj_end
+            if idle and traj_end is not None:
+                d_end = self._distance_to_xyz(*traj_end)
+                if d_end is not None and d_end > 2.5:
+                    time.sleep(0.3)
+                    continue
             carrot = self._carrot(plan)
             if carrot is not None:
                 c = carrot.pose.position
@@ -424,6 +457,14 @@ class MightyBridge(Node):
         dy = odom.pose.pose.position.y - pos.y
         dz = odom.pose.pose.position.z - pos.z
         return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    def _distance_to_xyz(self, x, y, z):
+        with self._lock:
+            odom = self._odom
+        if odom is None:
+            return None
+        p = odom.pose.pose.position
+        return math.dist((p.x, p.y, p.z), (x, y, z))
 
     def _publish_term_goal(self, pose_stamped):
         msg = PoseStamped()
