@@ -96,6 +96,7 @@ class MightyBridge(Node):
         self._follow_thread = None
         self._follow_done_plan = None
         self._traj_end = None        # last committed MIGHTY trajectory endpoint
+        self._pending_traj = None    # conflated trajectory awaiting the throttle window
 
         cb = ReentrantCallbackGroup()
 
@@ -141,6 +142,9 @@ class MightyBridge(Node):
             goal_callback=self._handle_goal,
             cancel_callback=self._handle_cancel,
             callback_group=cb)
+
+        # conflation flush for the receding-horizon throttle
+        self.create_timer(0.2, self._flush_pending_traj, callback_group=cb)
 
         # global_plan follower (see class docstring)
         if self.follow_enabled:
@@ -207,16 +211,10 @@ class MightyBridge(Node):
             # committed-trajectory end (the follower's catch-up gate compares
             # the vehicle to this)
             self._traj_end = (g_end.p.x, g_end.p.y, g_end.p.z)
-        # Receding-horizon throttle: replacing the controller trajectory at
-        # every replan (30-50 Hz) would keep re-anchoring the tracking point;
-        # once per override_period_s gives the controller a full window to
-        # track before the next replacement (whose start is at the vehicle).
-        if now - last_fwd < self.override_period:
-            return
         # Never forward a trajectory whose START is far from the vehicle: the
         # override re-anchors the tracking point there and the PID would fly
         # an uncommanded straight line through unswept space (observed:
-        # pillar penetration). With vehicle-synchronized consumption this is
+        # pillar penetration). With vehicle-anchored replanning this is
         # always transient — drop and wait.
         s0 = msg.goals[0]
         d_start = self._distance_to_xyz(s0.p.x, s0.p.y, s0.p.z)
@@ -224,8 +222,20 @@ class MightyBridge(Node):
             self.get_logger().warn(
                 f'dropping trajectory starting {d_start:.1f} m from the vehicle')
             return
+        # CONFLATING receding-horizon throttle: overriding at every replan
+        # (30-50 Hz) would keep re-anchoring the tracking point, but a
+        # dropping throttle loses the LAST trajectory of a burst — and MIGHTY
+        # stops replanning at GOAL_SEEN once its committed plan reaches the
+        # goal, so a dropped final trajectory parked the vehicle 8.6 m short.
+        # Buffer the newest; the flush timer publishes it when the period
+        # allows.
+        if now - last_fwd < self.override_period:
+            with self._lock:
+                self._pending_traj = msg
+            return
         with self._lock:
             self._last_forward_time = now
+            self._pending_traj = None
 
         out = TrajectoryXYZVYaw()
         out.header.stamp = msg.header.stamp
@@ -250,6 +260,18 @@ class MightyBridge(Node):
             wp.jerk.z = g.j.z
             out.waypoints.append(wp)
         self.segment_pub.publish(out)
+
+    def _flush_pending_traj(self):
+        with self._lock:
+            msg = self._pending_traj
+            last_fwd = getattr(self, '_last_forward_time', 0.0)
+        if msg is None:
+            return
+        if time.monotonic() - last_fwd < self.override_period:
+            return
+        with self._lock:
+            self._pending_traj = None
+        self._traj_cb(msg)
 
     # ------------------------------------------------------------------
     # global_plan follower (study route contract): the route planner
