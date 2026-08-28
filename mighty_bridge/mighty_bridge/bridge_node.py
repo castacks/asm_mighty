@@ -259,7 +259,20 @@ class MightyBridge(Node):
         self._follow_thread.start()
 
     def _carrot(self, poses):
-        """Path point ~follow_lookahead_m beyond the vehicle's projection."""
+        """Path point ~follow_lookahead_m beyond the vehicle's projection.
+
+        The walk CLAMPS at sharp path-direction reversals (route
+        checkpoints on out-and-back legs): a lookahead measured purely
+        along the path wraps around hairpins and can land back on the
+        vehicle (observed: stable hover deadlock 3.8 m short of a
+        checkpoint). Clamping makes the vehicle actually reach the
+        corner — which is also what lets the route planner's own
+        arrival radius trigger and drop the checkpoint from the path.
+        The clamp releases once the vehicle is within 1.5 m of the
+        corner (the walk then continues with a fresh direction
+        reference, covering the ~1 s of stale path before the planner
+        republishes without the reached checkpoint).
+        """
         with self._lock:
             odom = self._odom
         if odom is None:
@@ -273,12 +286,33 @@ class MightyBridge(Node):
             d = (q.x - p.x) ** 2 + (q.y - p.y) ** 2 + (q.z - p.z) ** 2
             if d < best_d:
                 best_d, best_i = d, i
+
+        def seg_dir(a, b):
+            v = (b.x - a.x, b.y - a.y, b.z - a.z)
+            n = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+            return (v[0] / n, v[1] / n, v[2] / n) if n > 1e-6 else None
+
         acc = 0.0
+        ref_dir = None
         prev = poses[best_i].pose.position
         for ps in poses[best_i + 1:]:
             q = ps.pose.position
-            acc += math.dist((prev.x, prev.y, prev.z), (q.x, q.y, q.z))
+            d = seg_dir(prev, q)
+            step = math.dist((prev.x, prev.y, prev.z), (q.x, q.y, q.z))
             prev = q
+            acc += step
+            if d is not None:
+                if ref_dir is None:
+                    ref_dir = d
+                else:
+                    dot = (ref_dir[0] * d[0] + ref_dir[1] * d[1]
+                           + ref_dir[2] * d[2])
+                    if dot < -0.17:  # direction reversed > ~100 deg
+                        near = math.dist((p.x, p.y, p.z), (q.x, q.y, q.z))
+                        if near > 1.5:
+                            return ps  # clamp at the corner until reached
+                        ref_dir = d    # corner reached: release, walk on
+                        acc = 0.0
             if acc >= self.follow_lookahead:
                 return ps
         return poses[-1]
@@ -315,6 +349,14 @@ class MightyBridge(Node):
             carrot = self._carrot(plan)
             if carrot is not None:
                 c = carrot.pose.position
+                # Defensive: never hand MIGHTY a goal at the vehicle's own
+                # position (goal_radius would flip it to GOAL_REACHED and it
+                # stops planning — the hover-deadlock failure mode). Skip
+                # this tick; the re-anchored path resolves it next second.
+                d_c = self._distance_to(c)
+                if d_c is not None and d_c < 1.0 and carrot is not plan[-1]:
+                    time.sleep(0.3)
+                    continue
                 now = time.monotonic()
                 moved = (last_goal is None or
                          math.dist((c.x, c.y, c.z), last_goal) > 1.0)
