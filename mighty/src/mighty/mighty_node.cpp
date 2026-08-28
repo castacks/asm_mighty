@@ -60,9 +60,17 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   // Get id from ns
   ns_ = this->get_namespace();
   ns_ = ns_.substr(ns_.find_last_of("/") + 1);
-  id_str_ = ns_.substr(ns_.size() -
-                       2);  // ns is like NX01, so we get the last two characters and convert to int
-  id_ = std::stoi(id_str_);
+  // asm_mighty: tolerant agent-id parsing. Upstream assumed NX01-style names
+  // (stoi of the last two chars) which throws on names like "robot_1".
+  // Take the trailing digit run instead; default to 1 when there is none.
+  {
+    size_t digit_start = ns_.size();
+    while (digit_start > 0 && std::isdigit(static_cast<unsigned char>(ns_[digit_start - 1])))
+      digit_start--;
+    id_str_ = ns_.substr(digit_start);
+    id_ = id_str_.empty() ? 1 : std::stoi(id_str_);
+    if (id_str_.empty()) id_str_ = "1";
+  }
 
   // Declare, set, and print parameters
   this->declareParameters();
@@ -277,13 +285,14 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
 
   if (par_.use_hardware) {
     // Hardware: subscribe independently (time-sync can fail due to timestamp mismatch)
+    // asm_mighty: QoSInitialization::from_rmw only copies history/depth, so the
+    // original code silently subscribed RELIABLE against the mapper's
+    // BEST_EFFORT publishers (incompatible under DDS). Use SensorDataQoS.
     sub_occupancy_grid_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        "occupancy_grid",
-        rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)),
+        "occupancy_grid", rclcpp::SensorDataQoS(),
         std::bind(&MIGHTY_NODE::occupancyMapCallback, this, std::placeholders::_1), options_map);
     sub_unknown_grid_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        "unknown_grid",
-        rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)),
+        "unknown_grid", rclcpp::SensorDataQoS(),
         std::bind(&MIGHTY_NODE::unknownMapCallback, this, std::placeholders::_1), options_map);
     RCLCPP_INFO(this->get_logger(),
                 "Hardware mode: subscribing to occupancy_grid and unknown_grid independently");

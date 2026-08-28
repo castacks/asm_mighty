@@ -57,6 +57,7 @@ namespace global_mapper_ros
     this->declare_parameter<double>("occupancy_grid.downsampled_occupancy_publish_rate", 5.0);
     this->declare_parameter<double>("occupancy_grid.unknown_publish_rate", 5.0);
     this->declare_parameter<bool>("occupancy_grid.publish_unknown_grid", true);
+    this->declare_parameter<int>("occupancy_grid.min_occupied_neighbors", 0);  // asm_mighty: was read but never declared
     this->declare_parameter<double>("occupancy_grid.clear_unknown_distance", 5.0);
 
     this->declare_parameter<int>("distance_grid.truncation_distance", 6);
