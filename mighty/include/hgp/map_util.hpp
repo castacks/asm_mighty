@@ -1001,10 +1001,13 @@ class MapUtil {
   void findClosestNonOccupiedPoint(const Vec3f& point, Vec3f& closest_non_occupied_point) {
     closest_non_occupied_point = point;
 
-    if (!map_initialized_) {
-      std::cout << "Map is not initialized" << std::endl;
-      return;
-    }
+    // asm_mighty: no map_initialized_ guard here. The per-solve PLANNING map
+    // copy (hgp_manager map_util_for_planning_) carries real data but never
+    // has its instance-level map_initialized_ flag set, so the guard made
+    // goal relocation always fail through that path (goal-in-pillar ->
+    // "dropping goal" loop). The index bounds checks below are sufficient:
+    // an actually-empty map yields no valid index and returns the input.
+    if (map_.empty() || total_size_ <= 0) return;
 
     Veci<3> point_int = floatToInt(point);
     int index = getIndex(point_int);
