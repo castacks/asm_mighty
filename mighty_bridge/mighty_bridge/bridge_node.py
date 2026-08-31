@@ -28,6 +28,7 @@ from rclpy.node import Node
 from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
                        QoSReliabilityPolicy)
 
+from action_msgs.msg import GoalStatusArray
 from airstack_msgs.msg import TrajectoryXYZVYaw, WaypointXYZVYaw
 from airstack_msgs.srv import TrajectoryMode
 from dynus_interfaces.msg import State, Trajectory
@@ -93,6 +94,11 @@ class MightyBridge(Node):
         self._settled_since = None
         self._airborne = False
         self._follow_plan = None     # list of PoseStamped adopted from global_plan
+        # A takeoff/land task publishes trajectory_override too (mavros-driven
+        # ascent/descent) — the follower must yield or it fights the last-write-
+        # wins override topic and can block a landing indefinitely.
+        self._takeoff_active = False
+        self._land_active = False
         self._follow_thread = None
         self._follow_done_plan = None
         self._traj_end = None        # last committed MIGHTY trajectory endpoint
@@ -151,6 +157,14 @@ class MightyBridge(Node):
             from nav_msgs.msg import Path
             self.create_subscription(Path, 'global_plan', self._global_plan_cb,
                                      reliable_qos, callback_group=cb)
+            self.create_subscription(
+                GoalStatusArray, 'takeoff_status',
+                lambda msg: self._set_task_flag('_takeoff_active', msg),
+                reliable_qos, callback_group=cb)
+            self.create_subscription(
+                GoalStatusArray, 'land_status',
+                lambda msg: self._set_task_flag('_land_active', msg),
+                reliable_qos, callback_group=cb)
             self.create_timer(1.0, self._follow_tick, callback_group=cb)
 
         self.get_logger().info(
@@ -295,8 +309,18 @@ class MightyBridge(Node):
             self.get_logger().info(
                 f'follower: adopted global_plan ({len(poses)} poses)')
 
+    def _set_task_flag(self, attr, msg):
+        ACTIVE = (1, 2, 3)  # ACCEPTED, EXECUTING, CANCELING
+        active = any(s.status in ACTIVE for s in msg.status_list)
+        with self._lock:
+            setattr(self, attr, active)
+
+    def _takeoff_or_land_active(self):
+        with self._lock:
+            return self._takeoff_active or self._land_active
+
     def _follow_tick(self):
-        if self._task_active or not self._airborne:
+        if self._task_active or self._takeoff_or_land_active() or not self._airborne:
             return
         with self._lock:
             plan = self._follow_plan
@@ -395,6 +419,16 @@ class MightyBridge(Node):
         while rclpy.ok():
             if self._task_active:
                 self.get_logger().info('follower: yielding to NavigateTask')
+                with self._lock:
+                    self._route_active = False
+                return
+            if self._takeoff_or_land_active():
+                # A takeoff/land task is driving trajectory_override itself
+                # (mavros-commanded ascent/descent) — stop publishing so we
+                # don't clobber it every override_period; _follow_tick()
+                # restarts this thread once the task clears, if the route
+                # isn't finished yet.
+                self.get_logger().info('follower: yielding to takeoff/land task')
                 with self._lock:
                     self._route_active = False
                 return

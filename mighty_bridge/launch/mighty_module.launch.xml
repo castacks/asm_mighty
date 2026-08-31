@@ -44,6 +44,12 @@
   <arg name="mighty_navigate_task_action"
        default="/$(env ROBOT_NAME)/tasks/navigate"
        description="Navigate task action server name (task_msgs/action/NavigateTask)" />
+  <arg name="mighty_takeoff_status_topic"
+       default="/$(env ROBOT_NAME)/tasks/takeoff/_action/status"
+       description="TakeoffTask action status (action_msgs/GoalStatusArray) — the global_plan follower yields while a takeoff is executing" />
+  <arg name="mighty_land_status_topic"
+       default="/$(env ROBOT_NAME)/tasks/land/_action/status"
+       description="LandTask action status (action_msgs/GoalStatusArray) — the global_plan follower yields while a landing is executing so it doesn't fight LandTask's own trajectory_override publishes" />
 
   <group>
     <push-ros-namespace namespace="mighty" />
@@ -73,6 +79,8 @@
       <remap from="trajectory_override" to="$(var mighty_trajectory_override_topic)" />
       <remap from="set_trajectory_mode" to="$(var mighty_set_trajectory_mode_service)" />
       <remap from="~/navigate_task" to="$(var mighty_navigate_task_action)" />
+      <remap from="takeoff_status" to="$(var mighty_takeoff_status_topic)" />
+      <remap from="land_status" to="$(var mighty_land_status_topic)" />
     </node>
 
     <!-- Identity init-pose frame for the planner's hardware-mode TF lookup -->
