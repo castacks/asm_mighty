@@ -216,6 +216,17 @@ class MightyBridge(Node):
         n = len(msg.goals)
         if n == 0:
             return
+        if not self._task_active and self._takeoff_or_land_active():
+            # A takeoff/land task owns trajectory_override right now (see
+            # _follow_route's yield): MIGHTY may still be replanning toward
+            # the last term_goal the follower set before it stopped, and
+            # forwarding those here would clobber the task's one-shot
+            # ascent/descent trajectory with a stale route segment, freezing
+            # the vehicle mid-air (observed: LandTask waits forever for
+            # LANDED_STATE_ON_GROUND that never arrives).
+            with self._lock:
+                self._pending_traj = None
+            return
         now = time.monotonic()
         g_end = msg.goals[-1]
         with self._lock:
