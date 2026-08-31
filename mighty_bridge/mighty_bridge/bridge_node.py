@@ -383,7 +383,12 @@ class MightyBridge(Node):
         # does not require — the reference mission glue's mode switch).
         with self._lock:
             self._route_active = True
-        # trajectory_override needs no controller mode management
+        # trajectory_override REPLACES the controller's trajectory buffer but
+        # does not touch trajectory_mode; the controller only advances the
+        # tracking point when mode != ROBOT_POSE (its post-takeoff idle mode —
+        # see takeoff_landing_task.cpp), so without this call the drone hovers
+        # forever regardless of what's published on trajectory_override.
+        self._set_mode(TrajectoryMode.Request.TRACK)
 
         last_goal = None
         last_pub = 0.0
@@ -530,7 +535,12 @@ class MightyBridge(Node):
 
         with self._lock:
             self._route_active = True
-        # trajectory_override needs no controller mode management
+        # trajectory_override REPLACES the controller's trajectory buffer but
+        # does not touch trajectory_mode; the controller only advances the
+        # tracking point when mode != ROBOT_POSE (its post-takeoff idle mode —
+        # see takeoff_landing_task.cpp), so without this call the drone hovers
+        # forever regardless of what's published on trajectory_override.
+        self._set_mode(TrajectoryMode.Request.TRACK)
 
         idx = 0
         last_pub = 0.0
