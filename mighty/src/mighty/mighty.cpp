@@ -2102,15 +2102,19 @@ void MIGHTY::updateMap(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& pclptr_ma
   hgp_manager_.updateMap(wdx_, wdy_, wdz_, map_center_, pclptr_map_, pclptr_unk_, obst_pos,
                          obst_bbox, traj_max_time);
 
-  // 4) Known‐space KD‐tree
-  if (pclptr_map_ && !pclptr_map_->points.empty()) {
+  // 4) Known‐space KD‐tree. An empty occupied cloud is a legitimate map
+  // state (a genuinely obstacle-free environment, not "no map yet") — build
+  // the (empty) KD-tree and mark it initialized either way, so
+  // checkReadyToReplan() doesn't stall forever waiting for an obstacle that
+  // will never appear.
+  if (pclptr_map_) {
     std::lock_guard<std::mutex> lk(mtx_kdtree_map_);
     kdtree_map_.setInputCloud(pclptr_map_);
     kdtree_map_initialized_ = true;
     hgp_manager_.updateVecOccupied(pclptr_to_vec(pclptr_map_));
   } else {
     RCLCPP_WARN(rclcpp::get_logger("mighty"),
-                "updateMap: member pclptr_map_ was null or empty; skipping KD-tree update");
+                "updateMap: member pclptr_map_ was null; skipping KD-tree update");
   }
 
   // 5) Unknown‐space KD‐tree
@@ -2155,15 +2159,15 @@ void MIGHTY::updateOccupancyMap(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& 
   hgp_manager_.updateMap(wdx_, wdy_, wdz_, map_center_, pclptr_map_, empty_unk, obst_pos, obst_bbox,
                          traj_max_time);
 
-  // 3) Known‐space KD‐tree
-  if (pclptr_map_ && !pclptr_map_->points.empty()) {
+  // 3) Known‐space KD‐tree (see updateMap() above: empty is a valid map).
+  if (pclptr_map_) {
     std::lock_guard<std::mutex> lk(mtx_kdtree_map_);
     kdtree_map_.setInputCloud(pclptr_map_);
     kdtree_map_initialized_ = true;
     hgp_manager_.updateVecOccupied(pclptr_to_vec(pclptr_map_));
   } else {
     RCLCPP_WARN(rclcpp::get_logger("mighty"),
-                "updateMap: member pclptr_map_ was null or empty; skipping KD-tree update");
+                "updateOccupancyMap: member pclptr_map_ was null; skipping KD-tree update");
   }
 }
 
