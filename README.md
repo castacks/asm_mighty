@@ -5,10 +5,13 @@ UPenn, RA-L 2026, [arXiv:2511.10822](https://arxiv.org/abs/2511.10822))
 packaged as an AirStack module, together with its **acl-mapping** voxel world
 model and a **mighty_bridge** adapter onto AirStack's local-planner seam.
 
-Replaces the DROAN local planner behind the exact same interfaces: the
-`tasks/navigate` NavigateTask action and
-`trajectory_controller/trajectory_segment_to_add` — the trajectory
-controller, PID, safety monitor, and takeoff/landing pipeline are untouched.
+**AirStack's default local planner** (from 0.21): it replaced the DROAN local
+planner behind the exact same interfaces — the `tasks/navigate` NavigateTask
+action in, receding-horizon `trajectory_controller/trajectory_override`
+trajectories out — so the trajectory controller, PID, safety monitor, and
+takeoff/landing pipeline are untouched. DROAN lives on as the
+[asm_droan](https://github.com/castacks/asm_droan) module (`full_droan` /
+`full_droan_cpu` stacks) for depth-camera-only vehicles.
 
 ## Why MIGHTY replaced DROAN
 
@@ -117,14 +120,25 @@ Everything is BSD-3/Apache-2.0-class permissive; **no Gurobi**.
 
 ## Install
 
+On AirStack 0.21.0-dev.10 or newer nothing is needed: the default
+`full_default` stack (and `lite_default` / `lite_offload_global`) pins this
+module in its `modules.repos`, and `airstack up` adds the pin and syncs it
+when it is missing. The module declares no image-level deps (the trunk robot
+image ships the nlohmann-json header), so no `module lock --build` step.
+
 ```bash
-airstack module add https://github.com/castacks/asm_mighty --version v0.1.3
-airstack module lock --build     # bakes the nlohmann-json3-dev dep layer
-airstack up --stack full_mighty --sim isaac
+airstack up --sim isaac          # full_default = MIGHTY
 ```
 
-Or use the `full_mighty` reference stack in AirStack, whose `modules.repos`
-pins this module.
+Explicitly, or on a custom stack:
+
+```bash
+airstack module add https://github.com/castacks/asm_mighty --version v0.1.4
+```
+
+On a 0.20.x trunk (DROAN still the in-tree default) pin **v0.1.3** and run
+`airstack module lock --build` — that release carries the nlohmann-json3-dev
+dep layer itself — then `airstack up --stack full_mighty --sim isaac`.
 
 ## Interfaces (canonical launch args)
 
@@ -174,6 +188,12 @@ an excavation below the takeoff point sets all three negative.
 
 ## Changelog
 
+- **v0.1.4** — AirStack 0.21 default-planner release, code-identical to
+  v0.1.3: `airstack_compat` → `>=0.21.0-dev.10 <0.22.0`; the
+  `nlohmann-json3-dev` apt dep is dropped from `module.yaml` because the
+  trunk robot image installs it (the default stack needs no composed layer).
+  Consumed by trunk's `full_default`, `lite_default` and
+  `lite_offload_global`; `full_mighty` was folded into `full_default`.
 - **v0.1.3** — launch args for the mapper -> planner grid seam
   (`mighty_mapper_*_topic`, `mighty_*_grid_topic`) and the altitude band
   (`mighty_z_min`, `mighty_mapper_z_ground`, `mighty_mapper_z_min_unknown`);
