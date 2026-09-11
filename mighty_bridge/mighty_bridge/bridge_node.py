@@ -39,6 +39,19 @@ code so log lines can be traced back here):
   end" gate releases after ``catchup_release_s``.
 - FIX 7 (route memory): "route already completed" only applies while the
   vehicle is still at that end.
+- FIX 8 (takeoff gate): the follower arms off the stack's
+  ``takeoff_landing_planner/is_airborne`` (std_msgs/Bool) once the vehicle
+  has settled, with the relative-climb gate as a fallback whose default is
+  1.5 m (was 8 m, a study-route value: AirStack's TakeoffTask climbs ~3 m, so
+  the follower adopted plans but never engaged — 9 plans adopted, 3.7 m
+  flown, first MIGHTY exploration run).
+- FIX 9 (landing): ``is_airborne`` going false clears the follower state —
+  airborne flag, adopted route, completed-route memory — so a second flight
+  in the same session flies again. The completed-route memory is keyed on
+  the plan's pose list (identity), not a 2 m radius around its end: a global
+  planner legitimately re-targets nearby, and RAVEN re-publishes the same
+  target until reached (observed: every later plan to a once-completed spot
+  dropped, no term_goal, drone hovering until the MIGHTY nodes restarted).
 - Arrival yaw: MIGHTY drops the terminal goal's orientation and the vehicle
   lands facing +x (yaw 0). On completion of a leg the bridge publishes a short
   ``trajectory_override`` at the arrival position with the requested yaw
@@ -95,7 +108,14 @@ class MightyBridge(Node):
         # climbed follow_min_climb_m and settled, the bridge walks that
         # path's poses as term_goal checkpoints exactly like a NavigateTask.
         self.declare_parameter('follow_global_plan', True)
-        self.declare_parameter('follow_min_climb_m', 8.0)
+        # FIX 8: the primary arming signal is takeoff_landing_planner/is_airborne
+        # (std_msgs/Bool, remapped in the module launch). The relative-climb gate
+        # below is the fallback for stacks without it; 1.5 m clears ground
+        # effect/odometry noise while staying under TakeoffTask's ~3 m climb.
+        # All bridge parameters are read once here — set them via the launch
+        # (<set_parameter>/<param>), not `ros2 param set` at runtime.
+        self.declare_parameter('follow_use_is_airborne', True)
+        self.declare_parameter('follow_min_climb_m', 1.5)
         self.declare_parameter('follow_settle_s', 3.0)
         # > mighty's goal_seen_radius (5.0) so the moving carrot never puts
         # the planner into GOAL_SEEN/GOAL_REACHED before the true route end
@@ -129,6 +149,7 @@ class MightyBridge(Node):
         self.twist_in_body_frame = bool(self.get_parameter('twist_in_body_frame').value)
         self.world_frame = str(self.get_parameter('world_frame').value)
         self.follow_enabled = bool(self.get_parameter('follow_global_plan').value)
+        self.follow_use_is_airborne = bool(self.get_parameter('follow_use_is_airborne').value)
         self.follow_min_climb = float(self.get_parameter('follow_min_climb_m').value)
         self.follow_settle_s = float(self.get_parameter('follow_settle_s').value)
         self.follow_lookahead = float(self.get_parameter('follow_lookahead_m').value)
@@ -152,10 +173,11 @@ class MightyBridge(Node):
         self._z0 = None
         self._settled_since = None
         self._airborne = False
+        self._is_airborne_msg = None  # last takeoff_landing_planner/is_airborne value (FIX 8)
         self._follow_plan = None     # list of PoseStamped adopted from global_plan
         self._follow_plan_t = 0.0    # monotonic time of the last adopted plan (FIX 3)
         self._follow_thread = None
-        self._follow_done_plan = None
+        self._follow_done_plan = None  # (plan key, final xyz) of the last completed route (FIX 7/9)
         self._traj_end = None        # last committed MIGHTY trajectory endpoint
         self._pending_traj = None    # conflated trajectory awaiting the throttle window
 
@@ -213,6 +235,11 @@ class MightyBridge(Node):
             self.create_subscription(Path, 'global_plan', self._global_plan_cb,
                                      reliable_qos, callback_group=cb)
             self.create_timer(1.0, self._follow_tick, callback_group=cb)
+            if self.follow_use_is_airborne:
+                from std_msgs.msg import Bool
+                # FIX 8/9: takeoff_landing_planner publishes it reliable, depth 1
+                self.create_subscription(Bool, 'is_airborne', self._is_airborne_cb,
+                                         state_qos, callback_group=cb)
 
         self.get_logger().info(
             f'mighty_bridge up (waypoint_tolerance={self.waypoint_tolerance} m, '
@@ -235,7 +262,8 @@ class MightyBridge(Node):
             vz = msg.twist.twist.linear.z
             if self._z0 is None:
                 self._z0 = z
-            elif ((z - self._z0 > self.follow_min_climb or
+            elif ((self._is_airborne_msg is True or                 # FIX 8: stack's own signal
+                   z - self._z0 > self.follow_min_climb or           # fallback: relative climb
                    (self.follow_airborne_above > 0 and z > self.follow_airborne_above))
                   and abs(vz) < 0.2):
                 if self._settled_since is None:
@@ -347,6 +375,43 @@ class MightyBridge(Node):
     # continuously and no per-leg mode resets are needed.
     # ------------------------------------------------------------------
 
+    def _is_airborne_cb(self, msg):
+        """FIX 8/9: takeoff_landing_planner/is_airborne (std_msgs/Bool).
+
+        True arms the follower (the odometry settle check still applies, so
+        the vehicle finishes its takeoff climb before a route is engaged).
+        False = landed: every follower memory is cleared so the next takeoff
+        in the same session starts fresh — the airborne flag, the adopted
+        route (the running follower thread exits on it), the completed-route
+        memory, and the climb baseline (re-taken from the next odometry).
+        """
+        was = self._is_airborne_msg
+        self._is_airborne_msg = bool(msg.data)
+        if msg.data:
+            return
+        with self._lock:
+            had_state = (self._airborne or was is True or self._follow_plan is not None
+                         or self._follow_done_plan is not None)
+        if not had_state:
+            return  # on the ground with nothing to clear (startup, repeated 'landed')
+        with self._lock:
+            self._airborne = False
+            self._settled_since = None
+            self._z0 = None
+            self._follow_plan = None
+            self._follow_plan_t = 0.0
+            self._follow_done_plan = None
+            self._route_active = False
+        self._cancel_arrival_yaw()
+        self.get_logger().info('follower: landed — route memory cleared, '
+                               'waiting for the next takeoff (FIX 9)')
+
+    @staticmethod
+    def _plan_key(poses):
+        """Identity of a global_plan: its pose positions rounded to 1 cm (FIX 9)."""
+        return tuple((round(ps.pose.position.x, 2), round(ps.pose.position.y, 2),
+                      round(ps.pose.position.z, 2)) for ps in poses)
+
     def _global_plan_cb(self, msg):
         if not msg.poses:
             return
@@ -372,18 +437,19 @@ class MightyBridge(Node):
         final = plan[-1].pose.position
         done = self._follow_done_plan
         if done is not None:
-            dx = final.x - done[0]
-            dy = final.y - done[1]
-            dz = final.z - done[2]
+            done_key, _done_final = done
             d_here = self._distance_to(final)
             # FIX 7: "already completed" only while the vehicle is still AT that end. The route
             # layer republishes a finished route every few seconds, which this gate rightly
             # ignores — but a later mission goal at the same place (missions repeat their
             # legs) was ignored too once the vehicle had moved away: hover forever with a fresh
             # 18-pose route adopted every tick (bridge_under_live_vid3, 2026-09-09).
-            if ((dx * dx + dy * dy + dz * dz) ** 0.5 < 2.0
+            # FIX 9: and only for the SAME plan (pose-list identity), never for a different
+            # plan that merely ends within 2 m — a global planner legitimately re-targets
+            # nearby (RAVEN re-publishes the same target until it considers it reached).
+            if (self._plan_key(plan) == done_key
                     and (d_here is None or d_here < self.waypoint_tolerance + 1.0)):
-                return  # this route was already completed and we are still there
+                return  # this exact route was already completed and we are still there
         if self._follow_thread is not None and self._follow_thread.is_alive():
             return
         self._follow_thread = threading.Thread(
@@ -465,6 +531,11 @@ class MightyBridge(Node):
         last_pub = 0.0
         withheld_since = None
         while rclpy.ok():
+            if not self._airborne:
+                self.get_logger().info('follower: vehicle landed — route dropped (FIX 9)')
+                with self._lock:
+                    self._route_active = False
+                return
             if self._task_active:
                 self.get_logger().info('follower: yielding to NavigateTask')
                 with self._lock:
@@ -500,7 +571,7 @@ class MightyBridge(Node):
                     f'follower: route complete ({d_final:.2f} m from end)')
                 self._arrival_yaw(plan[-1], why='route end')
                 with self._lock:
-                    self._follow_done_plan = (final.x, final.y, final.z)
+                    self._follow_done_plan = (self._plan_key(plan), (final.x, final.y, final.z))
                     self._follow_plan = None
                     self._route_active = False
                 return

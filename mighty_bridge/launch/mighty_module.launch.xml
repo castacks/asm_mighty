@@ -47,6 +47,9 @@
   <arg name="mighty_global_plan_topic"
        default="/$(env ROBOT_NAME)/global_plan"
        description="Input global route (nav_msgs/Path) the follower executes once airborne" />
+  <arg name="mighty_is_airborne_topic"
+       default="/$(env ROBOT_NAME)/takeoff_landing_planner/is_airborne"
+       description="Input airborne flag (std_msgs/Bool) that arms the global_plan follower after takeoff and clears its route memory on landing" />
   <arg name="mighty_set_trajectory_mode_service"
        default="/$(env ROBOT_NAME)/trajectory_controller/set_trajectory_mode"
        description="Trajectory-controller mode service (airstack_msgs/srv/TrajectoryMode)" />
@@ -102,6 +105,7 @@
     <node pkg="mighty_bridge" exec="mighty_bridge_node" name="mighty_bridge" output="screen">
       <remap from="odometry" to="$(var mighty_odometry_topic)" />
       <remap from="global_plan" to="$(var mighty_global_plan_topic)" />
+      <remap from="is_airborne" to="$(var mighty_is_airborne_topic)" />
       <remap from="mighty_trajectory" to="trajectory" />
       <remap from="trajectory_override" to="$(var mighty_trajectory_override_topic)" />
       <remap from="set_trajectory_mode" to="$(var mighty_set_trajectory_mode_service)" />

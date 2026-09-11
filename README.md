@@ -151,6 +151,7 @@ endpoint is a declared arg with a canonical default:
 | `mighty_lidar_frame` | `ouster` | (TF) |
 | `mighty_odometry_topic` | `/$ROBOT_NAME/odometry_conversion/odometry` | in |
 | `mighty_global_plan_topic` | `/$ROBOT_NAME/global_plan` | in |
+| `mighty_is_airborne_topic` | `/$ROBOT_NAME/takeoff_landing_planner/is_airborne` | in (arms the follower after takeoff, clears route memory on landing) |
 | `mighty_trajectory_override_topic` | `/$ROBOT_NAME/trajectory_controller/trajectory_override` | out |
 | `mighty_set_trajectory_mode_service` | `/$ROBOT_NAME/trajectory_controller/set_trajectory_mode` | out (srv) |
 | `mighty_navigate_task_action` | `/$ROBOT_NAME/tasks/navigate` | serves |
@@ -173,13 +174,17 @@ an excavation below the takeoff point sets all three negative.
   `mighty.yaml`; AirStack-changed values documented in the header.
 - `mighty_bridge/config/global_mapper_airstack.yaml` — voxel map (window
   size follows the drone in all axes, resolution, hit/miss).
-- Bridge params — set on the `mighty_bridge` node:
+- Bridge params — set on the `mighty_bridge` node. They are read **once at
+  startup**: set them from the launch (`<set_parameter>` scoped around the
+  module include, or a `<param>` on the node), not with `ros2 param set`.
 
   | Param | Default | Meaning |
   |---|---|---|
   | `waypoint_tolerance_m`, `segment_stride`, `term_goal_republish_s`, `override_period_s` | | checkpoint walk, decimation, `term_goal` republish, override rate |
   | `navigate_timeout_s` | 240 | abort a NavigateTask that has not reached its goal (0 = never) |
-  | `follow_global_plan`, `follow_min_climb_m`, `follow_settle_s`, `follow_lookahead_m` | | `global_plan` follower: enable, takeoff-climb gate, settle time, carrot lookahead |
+  | `follow_global_plan`, `follow_settle_s`, `follow_lookahead_m` | true, 3, 8 | `global_plan` follower: enable, settle time (|vz| < 0.2 m/s this long before engaging), carrot lookahead |
+  | `follow_use_is_airborne` | true | arm the follower off `takeoff_landing_planner/is_airborne` (after settling) and clear its route memory when it goes false (landing) |
+  | `follow_min_climb_m` | 1.5 | fallback arming gate when no `is_airborne` is published: climb above the first odometry sample (AirStack's TakeoffTask climbs ~3 m) |
   | `follow_plan_stale_s` | 15 | drop a route whose `global_plan` went silent this long (0 = never) |
   | `follow_airborne_above_m` | 0 (off) | count the vehicle as airborne above this map altitude, so a bridge (re)started mid-flight still engages |
   | `catchup_release_s` | 6 | max time the follower withholds carrots while MIGHTY flies to its committed end |
@@ -188,6 +193,18 @@ an excavation below the takeoff point sets all three negative.
 
 ## Changelog
 
+- **v0.1.5** — two `mighty_bridge` follower fixes from the first MIGHTY-default
+  exploration runs. (FIX 8) The follower arms off the stack's
+  `takeoff_landing_planner/is_airborne` once the vehicle has settled (new
+  `mighty_is_airborne_topic` launch arg, `follow_use_is_airborne` param) and
+  the relative-climb fallback defaults to 1.5 m instead of 8 m — a study-route
+  value that AirStack's ~3 m TakeoffTask never reached, so plans were adopted
+  but never engaged. (FIX 9) `is_airborne` going false (landing) clears the
+  follower state — airborne flag, adopted route, completed-route memory — so
+  a second flight in one session flies again, and the "route already
+  completed" check is keyed on the plan's pose list rather than a 2 m radius
+  around its end (a global planner re-targeting the same spot was dropped
+  forever until the nodes restarted). No wiring change beyond the new input.
 - **v0.1.4** — AirStack 0.21 default-planner release, code-identical to
   v0.1.3: `airstack_compat` → `>=0.21.0-dev.10 <0.22.0`; the
   `nlohmann-json3-dev` apt dep is dropped from `module.yaml` because the
