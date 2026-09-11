@@ -118,7 +118,7 @@ Everything is BSD-3/Apache-2.0-class permissive; **no Gurobi**.
 ## Install
 
 ```bash
-airstack module add https://github.com/castacks/asm_mighty --version v0.1.2
+airstack module add https://github.com/castacks/asm_mighty --version v0.1.3
 airstack module lock --build     # bakes the nlohmann-json3-dev dep layer
 airstack up --stack full_mighty --sim isaac
 ```
@@ -140,6 +140,17 @@ endpoint is a declared arg with a canonical default:
 | `mighty_trajectory_override_topic` | `/$ROBOT_NAME/trajectory_controller/trajectory_override` | out |
 | `mighty_set_trajectory_mode_service` | `/$ROBOT_NAME/trajectory_controller/set_trajectory_mode` | out (srv) |
 | `mighty_navigate_task_action` | `/$ROBOT_NAME/tasks/navigate` | serves |
+| `mighty_mapper_occupancy_grid_topic` / `mighty_mapper_unknown_grid_topic` | `occupancy_grid` / `unknown_grid` (inside `mighty/`) | mapper out |
+| `mighty_occupancy_grid_topic` / `mighty_unknown_grid_topic` | `occupancy_grid` / `unknown_grid` | planner in |
+| `mighty_z_min` | `0.5` | planner altitude floor [m] |
+| `mighty_mapper_z_ground` / `mighty_mapper_z_min_unknown` | `0.25` / `0.1` | mapper ground cut / unknown-volume floor [m] |
+
+The mapper -> planner grid seam is an arg pair so a stack can interpose its
+own node (e.g. lidar occupancy ∪ no-fly volumes) without copying this launch
+file: point the mapper at `occupancy_grid_lidar`, run the node from there to
+`occupancy_grid`, leave the planner side at its default. The altitude-band
+args exist because the YAML defaults assume ground at map z 0; a mission into
+an excavation below the takeoff point sets all three negative.
 
 ## Configuration
 
@@ -163,6 +174,10 @@ endpoint is a declared arg with a canonical default:
 
 ## Changelog
 
+- **v0.1.3** — launch args for the mapper -> planner grid seam
+  (`mighty_mapper_*_topic`, `mighty_*_grid_topic`) and the altitude band
+  (`mighty_z_min`, `mighty_mapper_z_ground`, `mighty_mapper_z_min_unknown`);
+  `.gitignore`, tracked `__pycache__` removed.
 - **v0.1.2** — bridge seam fixes from flying the module on AirStack 0.20.x
   (RayFronts notebook/067): TRACK mode before overrides (the "planner never
   replans" hang), NavigateTask timeout + preemption, stale `global_plan`

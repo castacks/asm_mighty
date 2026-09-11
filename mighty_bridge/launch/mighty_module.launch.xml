@@ -12,8 +12,20 @@
   Every cross-module topic endpoint is a declared <arg> defaulting to the
   canonical name (today's graph). Wiring deviations are passed as include args
   by the stack entry file — the single-locus rule. Topics internal to the
-  module (state, term_goal, occupancy_grid, unknown_grid, trajectory) stay
-  inside the mighty namespace and are not stack-visible endpoints.
+  module (state, term_goal, trajectory) stay inside the mighty namespace and
+  are not stack-visible endpoints.
+
+  The mapper -> planner grid seam IS exposed (mighty_mapper_*_topic = what the
+  mapper publishes, mighty_*_grid_topic = what the planner consumes; relative
+  names resolve inside the mighty namespace, defaults wire them straight
+  through). A stack that injects constraints into the planner's world model
+  points the mapper at e.g. occupancy_grid_lidar and runs its own node from
+  there to occupancy_grid — without copying this file.
+
+  The altitude band (mighty_z_min, mighty_mapper_z_ground,
+  mighty_mapper_z_min_unknown) is exposed because the YAML defaults assume a
+  ground at map z 0: a mission INTO an excavation below the takeoff point
+  needs the floor and walls mapped and plannable (set all three negative).
 -->
 <launch>
   <arg name="mighty_config"
@@ -45,6 +57,22 @@
        default="/$(env ROBOT_NAME)/tasks/navigate"
        description="Navigate task action server name (task_msgs/action/NavigateTask)" />
 
+  <arg name="mighty_mapper_occupancy_grid_topic" default="occupancy_grid"
+       description="Where global_mapper publishes its occupied voxel cloud (relative = inside the mighty namespace)" />
+  <arg name="mighty_mapper_unknown_grid_topic" default="unknown_grid"
+       description="Where global_mapper publishes its unknown voxel cloud" />
+  <arg name="mighty_occupancy_grid_topic" default="occupancy_grid"
+       description="Occupied voxel cloud the planner consumes (point elsewhere to interpose a constraint node)" />
+  <arg name="mighty_unknown_grid_topic" default="unknown_grid"
+       description="Unknown voxel cloud the planner consumes" />
+
+  <arg name="mighty_z_min" default="0.5"
+       description="Planner altitude floor [m, map z]; the YAML default 0.5 assumes ground at z 0" />
+  <arg name="mighty_mapper_z_ground" default="0.25"
+       description="global_mapper: lidar points below this map z are treated as ground and not marked occupied" />
+  <arg name="mighty_mapper_z_min_unknown" default="0.1"
+       description="global_mapper: lower bound of the unknown-space volume [m, map z]" />
+
   <group>
     <push-ros-namespace namespace="mighty" />
 
@@ -53,16 +81,21 @@
       <param from="$(var mighty_mapper_config)" allow_substs="true" />
       <param name="pose_type" value="state" />
       <param name="drone_frame" value="$(var mighty_lidar_frame)" />
+      <param name="z_ground" value="$(var mighty_mapper_z_ground)" />
+      <param name="z_min_unknown" value="$(var mighty_mapper_z_min_unknown)" />
       <remap from="depth_pointcloud_topic" to="$(var mighty_lidar_topic)" />
       <remap from="pose_topic" to="state" />
       <remap from="goal_topic" to="term_goal" />
-      <remap from="occupancy_grid_topic" to="occupancy_grid" />
-      <remap from="unknown_grid_topic" to="unknown_grid" />
+      <remap from="occupancy_grid_topic" to="$(var mighty_mapper_occupancy_grid_topic)" />
+      <remap from="unknown_grid_topic" to="$(var mighty_mapper_unknown_grid_topic)" />
     </node>
 
     <!-- MIGHTY planner -->
     <node pkg="mighty" exec="mighty" name="mighty_node" output="screen">
       <param from="$(var mighty_config)" allow_substs="true" />
+      <param name="z_min" value="$(var mighty_z_min)" />
+      <remap from="occupancy_grid" to="$(var mighty_occupancy_grid_topic)" />
+      <remap from="unknown_grid" to="$(var mighty_unknown_grid_topic)" />
     </node>
 
     <!-- Bridge: NavigateTask action, odometry->State, Trajectory->segments -->
