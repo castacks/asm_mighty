@@ -13,7 +13,36 @@ Responsibilities (one node so the module adds a single process):
   splice rejections produced silent hover deadlocks).
 - NavigateTask action server (``~/navigate_task``): walks the goal path's
   poses as successive ``term_goal`` checkpoints for MIGHTY, mirroring the
-  droan_gl task contract (ADD_SEGMENT while navigating, TRACK on exit).
+  droan_gl task contract (TRACK while navigating and on exit).
+
+Seam fixes carried since v0.1.1 (found flying the Quarry aerial demo on
+AirStack 0.20.x, RayFronts notebook/067 §2.4-2.6; numbered FIX 1-7 in the
+code so log lines can be traced back here):
+
+- FIX 1 (controller mode): ``takeoff_landing_task`` leaves the trajectory
+  controller in ROBOT_POSE after takeoff; in that mode the controller's timer
+  pins the tracking point to the robot pose, so ``trajectory_override`` is
+  merged but never flown. MIGHTY commits one trajectory, sees no progress and
+  idles in GOAL_SEEN forever ("planner never replans"). The bridge now sets
+  TRACK before it forwards overrides: when the follower engages and when a
+  NavigateTask starts.
+- FIX 2 (stuck task): a NavigateTask whose goal MIGHTY cannot reach never
+  returned and every later goal was rejected. ``navigate_timeout_s`` aborts it.
+- FIX 3 (dead plan): a ``global_plan`` that goes silent for
+  ``follow_plan_stale_s`` is dropped instead of pursued forever.
+- FIX 4 (mid-flight restart): ``follow_airborne_above_m`` lets a bridge
+  (re)started while airborne engage the follower (the climb gate is relative
+  to the first odometry it sees).
+- FIX 5 (preemption): a new NavigateTask preempts the active one (generation
+  counter) instead of being rejected.
+- FIX 6 (catch-up gate): the follower's "wait for MIGHTY to reach its committed
+  end" gate releases after ``catchup_release_s``.
+- FIX 7 (route memory): "route already completed" only applies while the
+  vehicle is still at that end.
+- Arrival yaw: MIGHTY drops the terminal goal's orientation and the vehicle
+  lands facing +x (yaw 0). On completion of a leg the bridge publishes a short
+  ``trajectory_override`` at the arrival position with the requested yaw
+  (``arrival_yaw`` = goal | hold | off, ``arrival_yaw_velocity``).
 """
 
 import math
@@ -60,6 +89,7 @@ class MightyBridge(Node):
         self.declare_parameter('override_period_s', 1.0)  # receding-horizon trajectory replacement rate
         self.declare_parameter('twist_in_body_frame', True)
         self.declare_parameter('world_frame', 'map')
+        self.declare_parameter('navigate_timeout_s', 240.0)  # FIX 2 (0 = never)
         # global_plan follower (study R5-R7 contract): the route planner
         # publishes a nav_msgs/Path on global_plan; once the vehicle has
         # climbed follow_min_climb_m and settled, the bridge walks that
@@ -70,6 +100,27 @@ class MightyBridge(Node):
         # > mighty's goal_seen_radius (5.0) so the moving carrot never puts
         # the planner into GOAL_SEEN/GOAL_REACHED before the true route end
         self.declare_parameter('follow_lookahead_m', 8.0)
+        # FIX 3 (dead plan): the route layer republishes global_plan every
+        # ~0.5 s while a goal is active. If it goes silent (planner restarted,
+        # goal cleared) the follower must not pursue its last carrot forever
+        # (observed: 10+ min of "Goal ... in occupied space" against a plan
+        # whose publisher no longer existed, blocking every later task).
+        self.declare_parameter('follow_plan_stale_s', 15.0)  # 0 = never
+        # FIX 4 (mid-flight restart): the takeoff-settle gate is RELATIVE to
+        # the first odometry the bridge sees, so a bridge (re)started while the
+        # vehicle is already airborne never engages the follower. Above this
+        # absolute altitude (map z; AirStack's map origin is the spawn point on
+        # the ground) the vehicle counts as airborne once settled. 0 = off.
+        self.declare_parameter('follow_airborne_above_m', 0.0)
+        self.declare_parameter('catchup_release_s', 6.0)  # FIX 6: max time the catch-up gate may withhold carrots
+        # Arrival yaw (see module docstring): MIGHTY drops the terminal goal's orientation and
+        # the vehicle lands facing +x whatever it flew. On completion of a leg the bridge publishes a
+        # short trajectory_override at the arrival position carrying the requested yaw.
+        #   'goal' = the leg's final pose yaw when its quaternion is not identity, else hold the current
+        #            heading (an unset orientation means "keep looking where you flew", not "face east");
+        #   'hold' = always keep the current heading;  'off' = MIGHTY's behaviour.
+        self.declare_parameter('arrival_yaw', 'goal')
+        self.declare_parameter('arrival_yaw_velocity', 0.3)
 
         self.waypoint_tolerance = float(self.get_parameter('waypoint_tolerance_m').value)
         self.republish_s = float(self.get_parameter('term_goal_republish_s').value)
@@ -81,11 +132,20 @@ class MightyBridge(Node):
         self.follow_min_climb = float(self.get_parameter('follow_min_climb_m').value)
         self.follow_settle_s = float(self.get_parameter('follow_settle_s').value)
         self.follow_lookahead = float(self.get_parameter('follow_lookahead_m').value)
+        self.navigate_timeout_s = float(self.get_parameter('navigate_timeout_s').value)
+        self.follow_plan_stale_s = float(self.get_parameter('follow_plan_stale_s').value)
+        self.follow_airborne_above = float(self.get_parameter('follow_airborne_above_m').value)
+        self.catchup_release_s = float(self.get_parameter('catchup_release_s').value)
+        self.arrival_yaw_mode = str(self.get_parameter('arrival_yaw').value)
+        self.arrival_yaw_velocity = float(self.get_parameter('arrival_yaw_velocity').value)
+        self._arrival_yaw_timer = None
+        self._arrival_yaw_t = 0.0        # the FIRST completion at an arrival wins (see _arrival_yaw)
 
         self._lock = threading.Lock()
         self._odom = None            # latest nav_msgs/Odometry
         self._last_traj_time = 0.0   # wall time of last MIGHTY trajectory
         self._task_active = False
+        self._nav_gen = 0            # NavigateTask generation; a newer accepted goal preempts (FIX 5)
         self._cancel_requested = False
         self._route_active = False   # a NavigateTask or follower route is executing
         # follower state
@@ -93,6 +153,7 @@ class MightyBridge(Node):
         self._settled_since = None
         self._airborne = False
         self._follow_plan = None     # list of PoseStamped adopted from global_plan
+        self._follow_plan_t = 0.0    # monotonic time of the last adopted plan (FIX 3)
         self._follow_thread = None
         self._follow_done_plan = None
         self._traj_end = None        # last committed MIGHTY trajectory endpoint
@@ -174,7 +235,9 @@ class MightyBridge(Node):
             vz = msg.twist.twist.linear.z
             if self._z0 is None:
                 self._z0 = z
-            elif z - self._z0 > self.follow_min_climb and abs(vz) < 0.2:
+            elif ((z - self._z0 > self.follow_min_climb or
+                   (self.follow_airborne_above > 0 and z > self.follow_airborne_above))
+                  and abs(vz) < 0.2):
                 if self._settled_since is None:
                     self._settled_since = time.monotonic()
                 elif time.monotonic() - self._settled_since > self.follow_settle_s:
@@ -291,6 +354,7 @@ class MightyBridge(Node):
         with self._lock:
             first = self._follow_plan is None
             self._follow_plan = poses
+            self._follow_plan_t = time.monotonic()
         if first:
             self.get_logger().info(
                 f'follower: adopted global_plan ({len(poses)} poses)')
@@ -300,6 +364,9 @@ class MightyBridge(Node):
             return
         with self._lock:
             plan = self._follow_plan
+            if (plan is not None and self.follow_plan_stale_s > 0 and
+                    time.monotonic() - self._follow_plan_t > self.follow_plan_stale_s):
+                self._follow_plan = plan = None  # FIX 3: never engage a dead plan
         if plan is None:
             return
         final = plan[-1].pose.position
@@ -308,8 +375,15 @@ class MightyBridge(Node):
             dx = final.x - done[0]
             dy = final.y - done[1]
             dz = final.z - done[2]
-            if (dx * dx + dy * dy + dz * dz) ** 0.5 < 2.0:
-                return  # this route was already completed
+            d_here = self._distance_to(final)
+            # FIX 7: "already completed" only while the vehicle is still AT that end. The route
+            # layer republishes a finished route every few seconds, which this gate rightly
+            # ignores — but a later mission goal at the same place (missions repeat their
+            # legs) was ignored too once the vehicle had moved away: hover forever with a fresh
+            # 18-pose route adopted every tick (bridge_under_live_vid3, 2026-09-09).
+            if ((dx * dx + dy * dy + dz * dz) ** 0.5 < 2.0
+                    and (d_here is None or d_here < self.waypoint_tolerance + 1.0)):
+                return  # this route was already completed and we are still there
         if self._follow_thread is not None and self._follow_thread.is_alive():
             return
         self._follow_thread = threading.Thread(
@@ -379,14 +453,17 @@ class MightyBridge(Node):
     def _follow_route(self):
         self.get_logger().info('follower: engaging (lookahead '
                                f'{self.follow_lookahead} m)')
+        self._cancel_arrival_yaw()
         # One-time controller timeline reset (duplicates — and therefore
         # does not require — the reference mission glue's mode switch).
         with self._lock:
             self._route_active = True
-        # trajectory_override needs no controller mode management
+        # FIX 1: the controller must be TRACKing for trajectory_override to be flown
+        self._set_mode(TrajectoryMode.Request.TRACK)
 
         last_goal = None
         last_pub = 0.0
+        withheld_since = None
         while rclpy.ok():
             if self._task_active:
                 self.get_logger().info('follower: yielding to NavigateTask')
@@ -395,6 +472,15 @@ class MightyBridge(Node):
                 return
             with self._lock:
                 plan = self._follow_plan
+                stale = (self.follow_plan_stale_s > 0 and plan is not None and
+                         time.monotonic() - self._follow_plan_t > self.follow_plan_stale_s)
+            if stale:
+                self.get_logger().warning(
+                    f'follower: global_plan silent for {self.follow_plan_stale_s:.0f} s '
+                    '— dropping the route (FIX 3)')
+                with self._lock:
+                    self._follow_plan = None
+                    plan = None
             if plan is None:
                 with self._lock:
                     self._route_active = False
@@ -412,6 +498,7 @@ class MightyBridge(Node):
                 self._publish_term_goal(plan[-1])
                 self.get_logger().info(
                     f'follower: route complete ({d_final:.2f} m from end)')
+                self._arrival_yaw(plan[-1], why='route end')
                 with self._lock:
                     self._follow_done_plan = (final.x, final.y, final.z)
                     self._follow_plan = None
@@ -430,8 +517,21 @@ class MightyBridge(Node):
             if idle and traj_end is not None:
                 d_end = self._distance_to_xyz(*traj_end)
                 if d_end is not None and d_end > 2.5:
-                    time.sleep(0.3)
-                    continue
+                    # FIX 6: the gate must release. If MIGHTY never flies to its committed end
+                    # (goal relocated/abandoned, task preempted), the vehicle never "catches up"
+                    # and the follower withheld carrots forever (observed: hover at a reached
+                    # checkpoint while a fresh 25-pose route was published every second).
+                    if withheld_since is None:
+                        withheld_since = time.monotonic()
+                    if time.monotonic() - withheld_since < self.catchup_release_s:
+                        time.sleep(0.3)
+                        continue
+                    self.get_logger().warn(
+                        f'follower: catch-up gate released after {self.catchup_release_s:.0f} s '
+                        f'(MIGHTY end {d_end:.1f} m away, FIX 6)')
+                    with self._lock:
+                        self._traj_end = None
+            withheld_since = None
             if carrot is not None:
                 c = carrot.pose.position
                 # Defensive: never hand MIGHTY a goal at the vehicle's own
@@ -456,12 +556,17 @@ class MightyBridge(Node):
     # ------------------------------------------------------------------
 
     def _handle_goal(self, goal_request):
-        if self._task_active:
-            self.get_logger().warn('Rejecting NavigateTask goal: task already active')
-            return GoalResponse.REJECT
         if not goal_request.global_plan.poses:
             self.get_logger().warn('Rejecting NavigateTask goal: empty global_plan')
             return GoalResponse.REJECT
+        # FIX 5 (preemption): a new NavigateTask replaces the active one instead of being
+        # rejected. Observed: a detached client whose goal MIGHTY could not finish kept the
+        # server busy for the full navigate_timeout_s (240 s) while the follower yielded to
+        # it — a whole mission spent hovering. Each execute loop carries the generation it
+        # was accepted under and exits ('Preempted') as soon as a newer goal is accepted.
+        if self._task_active:
+            self.get_logger().warn('NavigateTask goal preempts the active task')
+        self._nav_gen += 1
         self._task_active = True
         return GoalResponse.ACCEPT
 
@@ -495,6 +600,88 @@ class MightyBridge(Node):
         p = odom.pose.pose.position
         return math.dist((p.x, p.y, p.z), (x, y, z))
 
+    @staticmethod
+    def _yaw_of(q):
+        """Yaw (rad) of a geometry_msgs quaternion, or None for (near-)identity."""
+        if abs(q.x) < 1e-6 and abs(q.y) < 1e-6 and abs(q.z) < 1e-6 and abs(q.w - 1.0) < 1e-6:
+            return None
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _current_yaw(self):
+        with self._lock:
+            odom = self._odom
+        if odom is None:
+            return None
+        q = odom.pose.pose.orientation
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _cancel_arrival_yaw(self):
+        t = self._arrival_yaw_timer
+        if t is not None:
+            t.cancel()
+            self._arrival_yaw_timer = None
+
+    def _arrival_yaw(self, pose_stamped, why=''):
+        """Turn in place at the end of a leg (see module docstring). Publishes a two-waypoint
+        trajectory_override at the vehicle's position with the chosen yaw, and again 2 s later:
+        MIGHTY's own final segment (yaw 0) can arrive after the completion is detected and the
+        controller flies the LAST override it received."""
+        mode = self.arrival_yaw_mode
+        if mode == 'off':
+            return
+        # Two consumers can complete at the same arrival (the follower's route and a NavigateTask
+        # to the same point, the driver publishes both): the first wins for 5 s, or the second
+        # (a degenerate one-pose route, yaw 0) undoes the turn (observed 2026-09-10).
+        now = time.monotonic()
+        if now - self._arrival_yaw_t < 5.0:
+            return
+        self._arrival_yaw_t = now
+        yaw = None
+        if mode == 'goal':
+            yaw = self._yaw_of(pose_stamped.pose.orientation)
+        if yaw is None:
+            yaw = self._current_yaw()
+        if yaw is None:
+            return
+        with self._lock:
+            odom = self._odom
+        if odom is None:
+            return
+        p = odom.pose.pose.position
+        frame = pose_stamped.header.frame_id or self.world_frame
+
+        def publish():
+            out = TrajectoryXYZVYaw()
+            out.header.stamp = self.get_clock().now().to_msg()
+            out.header.frame_id = frame
+            for k in range(2):
+                wp = WaypointXYZVYaw()
+                # a 0.1 m step along the new heading keeps the segment non-degenerate
+                wp.position.x = p.x + 0.1 * k * math.cos(yaw)
+                wp.position.y = p.y + 0.1 * k * math.sin(yaw)
+                wp.position.z = p.z
+                wp.velocity = self.arrival_yaw_velocity
+                wp.yaw = yaw
+                out.waypoints.append(wp)
+            self.segment_pub.publish(out)
+
+        self._set_mode(TrajectoryMode.Request.TRACK)
+        publish()
+        self.get_logger().info(f'arrival yaw {math.degrees(yaw):.0f} deg ({mode}{", " + why if why else ""})')
+        if self._arrival_yaw_timer is not None:
+            self._arrival_yaw_timer.cancel()
+
+        def again():
+            self._arrival_yaw_timer.cancel()
+            self._arrival_yaw_timer = None
+            # a new leg started meanwhile: never hold the vehicle at the old arrival while MIGHTY
+            # is flying it away (that stalled MIGHTY in TRAVELING<->GOAL_SEEN, 2026-09-10)
+            if self._task_active or self._route_active:
+                return
+            publish()
+
+        self._arrival_yaw_timer = self.create_timer(2.0, again)
+
     def _publish_term_goal(self, pose_stamped):
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -502,14 +689,15 @@ class MightyBridge(Node):
         msg.pose = pose_stamped.pose
         self.term_goal_pub.publish(msg)
 
-    def _finish(self, goal_handle, success, message):
+    def _finish(self, goal_handle, success, message, keep_active=False):
         with self._lock:
             self._route_active = False
         self._set_mode(TrajectoryMode.Request.TRACK)
         result = NavigateTask.Result()
         result.success = success
         result.message = message
-        self._task_active = False
+        if not keep_active:          # a preempting task (FIX 5) now owns the server
+            self._task_active = False
         if success:
             goal_handle.succeed()
         elif self._cancel_requested and goal_handle.is_cancel_requested:
@@ -519,24 +707,31 @@ class MightyBridge(Node):
         return result
 
     def _execute_navigate(self, goal_handle):
+        my_gen = self._nav_gen
         goal = goal_handle.request
         self._cancel_requested = False
         poses = list(goal.global_plan.poses)
+        # FIX 1: TRACK before the first override (see module docstring)
+        self._set_mode(TrajectoryMode.Request.TRACK)
+        t_start = time.monotonic()
         final_pos = poses[-1].pose.position
         goal_tol = max(0.1, float(goal.goal_tolerance_m))
 
         self.get_logger().info(
             f'NavigateTask: {len(poses)} waypoints, goal tolerance {goal_tol:.2f} m')
+        self._cancel_arrival_yaw()
 
         with self._lock:
             self._route_active = True
-        # trajectory_override needs no controller mode management
 
         idx = 0
         last_pub = 0.0
         rate_s = 0.2
 
         while rclpy.ok():
+            if self._nav_gen != my_gen:
+                return self._finish(goal_handle, False, 'Preempted by a newer NavigateTask (FIX 5)',
+                                    keep_active=True)
             if self._cancel_requested and goal_handle.is_cancel_requested:
                 return self._finish(goal_handle, False, 'Canceled')
 
@@ -550,6 +745,12 @@ class MightyBridge(Node):
 
             dist_final = self._distance_to(final_pos)
             if dist_final is not None:
+                if (self.navigate_timeout_s > 0 and
+                        time.monotonic() - t_start > self.navigate_timeout_s):
+                    self.get_logger().warn(
+                        f'NavigateTask: timeout after {self.navigate_timeout_s:.0f} s '
+                        '— aborting (FIX 2)')
+                    return self._finish(goal_handle, False, 'timeout')
                 fb = NavigateTask.Feedback()
                 fb.status = f'navigating wp {idx + 1}/{len(poses)}'
                 fb.distance_to_goal = float(dist_final)
@@ -561,6 +762,7 @@ class MightyBridge(Node):
                 goal_handle.publish_feedback(fb)
 
                 if dist_final < goal_tol and idx == len(poses) - 1:
+                    self._arrival_yaw(poses[-1], why='NavigateTask goal')
                     return self._finish(goal_handle, True, 'Goal reached')
 
                 if idx < len(poses) - 1:

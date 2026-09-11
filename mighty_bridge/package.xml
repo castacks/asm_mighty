@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>mighty_bridge</name>
-  <version>0.1.0</version>
+  <version>0.1.2</version>
   <description>
     Adapter between the MIGHTY planner and AirStack's local-planner seam:
     serves the NavigateTask action, converts odometry to dynus State (twist

@@ -90,12 +90,16 @@ flowchart LR
   corridors (DecompUtil), quintic-Hermite-spline soft-constrained L-BFGS
   back end (GCOPTER-derived — no solver licenses). CPU-only.
 - **mighty_bridge**: serves NavigateTask (walks the goal path's poses as
-  successive `term_goal` checkpoints, ADD_SEGMENT while navigating, TRACK on
-  exit), converts odometry -> `dynus_interfaces/State` (twist rotated to
-  world frame), and converts each committed `dynus_interfaces/Trajectory`
-  into a decimated `TrajectoryXYZVYaw` segment (the controller's merge
-  splices it at the closest future point — matching MIGHTY's
-  replan-from-committed-point behavior).
+  successive `term_goal` checkpoints; a newer goal preempts the active one;
+  `navigate_timeout_s` bounds an unreachable goal), follows a `global_plan`
+  route once airborne, converts odometry -> `dynus_interfaces/State` (twist
+  rotated to world frame), and converts each committed
+  `dynus_interfaces/Trajectory` into a decimated `TrajectoryXYZVYaw`
+  published as a receding-horizon `trajectory_override`. The bridge puts the
+  trajectory controller in TRACK mode before it forwards overrides (AirStack
+  0.20.x leaves it in ROBOT_POSE after takeoff, where overrides are merged but
+  never flown) and, on completion of a leg, turns the vehicle to the leg's
+  requested yaw (`arrival_yaw`) — MIGHTY itself drops the goal orientation.
 
 ## Packages
 
@@ -114,7 +118,7 @@ Everything is BSD-3/Apache-2.0-class permissive; **no Gurobi**.
 ## Install
 
 ```bash
-airstack module add https://github.com/castacks/asm_mighty --version v0.1.1
+airstack module add https://github.com/castacks/asm_mighty --version v0.1.2
 airstack module lock --build     # bakes the nlohmann-json3-dev dep layer
 airstack up --stack full_mighty --sim isaac
 ```
@@ -132,7 +136,8 @@ endpoint is a declared arg with a canonical default:
 | `mighty_lidar_topic` | `/$ROBOT_NAME/sensors/ouster/point_cloud` | in |
 | `mighty_lidar_frame` | `ouster` | (TF) |
 | `mighty_odometry_topic` | `/$ROBOT_NAME/odometry_conversion/odometry` | in |
-| `mighty_trajectory_segment_topic` | `/$ROBOT_NAME/trajectory_controller/trajectory_segment_to_add` | out |
+| `mighty_global_plan_topic` | `/$ROBOT_NAME/global_plan` | in |
+| `mighty_trajectory_override_topic` | `/$ROBOT_NAME/trajectory_controller/trajectory_override` | out |
 | `mighty_set_trajectory_mode_service` | `/$ROBOT_NAME/trajectory_controller/set_trajectory_mode` | out (srv) |
 | `mighty_navigate_task_action` | `/$ROBOT_NAME/tasks/navigate` | serves |
 
@@ -143,8 +148,30 @@ endpoint is a declared arg with a canonical default:
   `mighty.yaml`; AirStack-changed values documented in the header.
 - `mighty_bridge/config/global_mapper_airstack.yaml` — voxel map (window
   size follows the drone in all axes, resolution, hit/miss).
-- Bridge params (`waypoint_tolerance_m`, `segment_stride`,
-  `term_goal_republish_s`) — set on the `mighty_bridge` node.
+- Bridge params — set on the `mighty_bridge` node:
+
+  | Param | Default | Meaning |
+  |---|---|---|
+  | `waypoint_tolerance_m`, `segment_stride`, `term_goal_republish_s`, `override_period_s` | | checkpoint walk, decimation, `term_goal` republish, override rate |
+  | `navigate_timeout_s` | 240 | abort a NavigateTask that has not reached its goal (0 = never) |
+  | `follow_global_plan`, `follow_min_climb_m`, `follow_settle_s`, `follow_lookahead_m` | | `global_plan` follower: enable, takeoff-climb gate, settle time, carrot lookahead |
+  | `follow_plan_stale_s` | 15 | drop a route whose `global_plan` went silent this long (0 = never) |
+  | `follow_airborne_above_m` | 0 (off) | count the vehicle as airborne above this map altitude, so a bridge (re)started mid-flight still engages |
+  | `catchup_release_s` | 6 | max time the follower withholds carrots while MIGHTY flies to its committed end |
+  | `arrival_yaw` | `goal` | on completion of a leg: `goal` = the final pose's yaw (hold heading when its quaternion is identity), `hold` = keep heading, `off` = MIGHTY's behaviour (lands facing +x) |
+  | `arrival_yaw_velocity` | 0.3 | velocity of the two-waypoint turn-in-place override |
+
+## Changelog
+
+- **v0.1.2** — bridge seam fixes from flying the module on AirStack 0.20.x
+  (RayFronts notebook/067): TRACK mode before overrides (the "planner never
+  replans" hang), NavigateTask timeout + preemption, stale `global_plan`
+  drop, mid-flight restart gate, catch-up gate release, "route completed"
+  memory only while still at the end, and arrival yaw. Numbered FIX 1-7 in
+  `mighty_bridge/bridge_node.py`'s docstring and log lines.
+- **v0.1.1** — receding-horizon `trajectory_override` replaces ADD_SEGMENT
+  merging; vehicle-anchored replanning; follower completion contract.
+- **v0.1.0** — first release (judged-eval hardening, DROAN comparison).
 
 ## Testing
 
